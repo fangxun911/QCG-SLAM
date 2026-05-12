@@ -29,6 +29,4 @@ If you find our work useful, please consider citing:
 }
 ```
 
-## Acknowledgements
-
 Code coming soon...
