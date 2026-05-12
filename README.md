@@ -8,7 +8,11 @@
 
 <sup>*</sup> Corresponding author
 
-![System Overview](assets/SystemOverview.png)
+## Pipeline
+
+<p align="center">
+  <img src="assets/SystemOverview.png" alt="Pipeline of QCG-SLAM" width="90%">
+</p>
 
 ## Abstract
 
