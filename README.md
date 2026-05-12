@@ -2,7 +2,7 @@
 
 **[ICME 2025]** QCG-SLAM: Quadtree-based Condensed Gaussian Splatting for Visual SLAM
 
-[Xun Fang](https://github.com/fangxun911)<sup>1</sup>, Zixuan Hua<sup>1</sup>, Xiao Zhao<sup>1</sup>, [Lihua Zhang](mailto:lihuazhang@fudan.edu.cn)<sup>1,2,3,*</sup>
+[Xun Fang](https://github.com/fangxun911)<sup>1</sup>, [Zixuan Hua](https://github.com/Moongod-Love)<sup>1</sup>, Xiao Zhao<sup>1</sup>, [Lihua Zhang](mailto:lihuazhang@fudan.edu.cn)<sup>1,2,3,*</sup>
 
 <sup>1</sup> Academy for Engineering and Technology, Fudan University, Shanghai, China  
 <sup>2</sup> Engineering Research Center of AI and Robotics, Ministry of Education, Shanghai, China  
