@@ -20,6 +20,12 @@
 
 Recent studies highlight the potential of 3D Gaussian Splatting in visual SLAM systems. However, current methods often initialize and densify Gaussians on a per-pixel basis, leading to redundancy and high storage demands. To address these limitations, we propose **QCG-SLAM**, an innovative Gaussian-based SLAM system introducing three key contributions: (1) a redesigned Gaussian initialization and densification process leveraging a quadtree segmentation scheme, effectively reducing the number of Gaussians required for scene representation; (2) a coarse-to-fine scene reconstruction paradigm that accelerates convergence and enhances rendering quality; and (3) a Confidence Sampling-based Keyframe Selection (CSKS) strategy that mitigates catastrophic forgetting and tracking cumulative error issues, demonstrating clear advantages in both accuracy and efficiency. Extensive experiments demonstrate that QCG-SLAM requires only **32.18%** of SplaTAM's memory on the Replica dataset and **25.70%** on the TUM-RGBD dataset on average, while maintaining state-of-the-art (SOTA) performance in camera tracking and scene reconstruction.
 
+## Qualitative Results
+
+<p align="center">
+  <img src="assets/qualitative.png" alt="Qualitative Results" width="90%">
+</p>
+
 ## Citation
 
 If you find our work useful, please consider citing:
