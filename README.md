@@ -8,7 +8,7 @@
 
 <sup>*</sup> Corresponding author
 
-![System Overview](media/SystemOverview.png)
+![System Overview](assets/SystemOverview.png)
 
 ## Abstract
 
