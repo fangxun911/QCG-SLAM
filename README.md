@@ -1,4 +1,4 @@
-# [ICME 2025] QCG-SLAM: Quadtree-based Condensed Gaussian Splatting for Visual SLAM
+# [[ICME 2025](https://2025.ieeeicme.org/)] QCG-SLAM: Quadtree-based Condensed Gaussian Splatting for Visual SLAM
 
 [Xun Fang](https://github.com/fangxun911)<sup>1</sup>, [Zixuan Hua](https://github.com/Moongod-Love)<sup>1</sup>, Xiao Zhao<sup>1</sup>, [Lihua Zhang](mailto:lihuazhang@fudan.edu.cn)<sup>1,2,3,*</sup>
 
