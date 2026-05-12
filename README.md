@@ -8,6 +8,8 @@
 
 <sup>*</sup> Corresponding author
 
+[[Paper](https://ieeexplore.ieee.org/document/11210108)]
+
 ## Pipeline
 
 <p align="center">
