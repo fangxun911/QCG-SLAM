@@ -1,6 +1,14 @@
 BSD 3-Clause License
 
+Unless otherwise noted in a source file or in THIRD_PARTY_NOTICES.md, this
+license applies to QCG-SLAM, including modifications made to SplaTAM-derived
+code.
+
+Original SplaTAM code:
 Copyright (c) 2023, Nikhil Varma Keetha
+
+QCG-SLAM modifications:
+Copyright (c) 2026, fangxun911
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
