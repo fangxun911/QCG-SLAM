@@ -11,9 +11,7 @@ from .basedataset import GradSLAMDataset
 
 
 class RealsenseDataset(GradSLAMDataset):
-    """
-    Dataset class to process depth images captured by realsense camera on the tabletop manipulator
-    """
+    """Dataset class for Realsense depth images on the tabletop manipulator."""
 
     def __init__(
         self,
@@ -31,7 +29,8 @@ class RealsenseDataset(GradSLAMDataset):
         **kwargs,
     ):
         self.input_folder = os.path.join(basedir, sequence)
-        # only poses/images/depth corresponding to the realsense_camera_order are read/used
+        # only poses/images/depth corresponding to the realsense_camera_order
+        # are read/used
         self.pose_path = os.path.join(self.input_folder, "poses")
         super().__init__(
             config_dict,
@@ -47,17 +46,21 @@ class RealsenseDataset(GradSLAMDataset):
         )
 
     def get_filepaths(self):
-        color_paths = natsorted(glob.glob(os.path.join(self.input_folder, "rgb", "*.jpg")))
-        depth_paths = natsorted(glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
+        color_paths = natsorted(
+            glob.glob(os.path.join(self.input_folder, "rgb", "*.jpg")))
+        depth_paths = natsorted(
+            glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
         embedding_paths = None
         if self.load_embeddings:
-            embedding_paths = natsorted(glob.glob(f"{self.input_folder}/{self.embedding_dir}/*.pt"))
+            embedding_paths = natsorted(
+                glob.glob(f"{self.input_folder}/{self.embedding_dir}/*.pt"))
         return color_paths, depth_paths, embedding_paths
 
     def load_poses(self):
         posefiles = natsorted(glob.glob(os.path.join(self.pose_path, "*.npy")))
         poses = []
-        P = torch.tensor([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]]).float()
+        P = torch.tensor([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0],
+                          [0, 0, 0, 1]]).float()
         for posefile in posefiles:
             c2w = torch.from_numpy(np.load(posefile)).float()
             _R = c2w[:3, :3]

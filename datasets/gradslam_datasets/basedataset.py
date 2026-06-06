@@ -103,6 +103,7 @@ def readEXR_onlydepth(filename):
 
 
 class GradSLAMDataset(torch.utils.data.Dataset):
+
     def __init__(
         self,
         config_dict,
@@ -118,7 +119,8 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         load_embeddings: bool = False,
         embedding_dir: str = "feat_lseg_240_320",
         embedding_dim: int = 512,
-        relative_pose: bool = True,  # If True, the pose is relative to the first frame
+        relative_pose:
+        bool = True,  # If True, the pose is relative to the first frame
         **kwargs,
     ):
         super().__init__()
@@ -137,8 +139,10 @@ class GradSLAMDataset(torch.utils.data.Dataset):
 
         self.desired_height = desired_height
         self.desired_width = desired_width
-        self.height_downsample_ratio = float(self.desired_height) / self.orig_height
-        self.width_downsample_ratio = float(self.desired_width) / self.orig_width
+        self.height_downsample_ratio = float(
+            self.desired_height) / self.orig_height
+        self.width_downsample_ratio = float(
+            self.desired_width) / self.orig_width
         self.channels_first = channels_first
         self.normalize_color = normalize_color
 
@@ -152,43 +156,50 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         if start < 0:
             raise ValueError("start must be positive. Got {0}.".format(stride))
         if not (end == -1 or end > start):
-            raise ValueError("end ({0}) must be -1 (use all images) or greater than start ({1})".format(end, start))
+            raise ValueError(
+                "end ({0}) must be -1 (use all images) or greater than start "
+                "({1})".format(end, start))
 
-        self.distortion = (
-            np.array(config_dict["camera_params"]["distortion"])
-            if "distortion" in config_dict["camera_params"]
-            else None
-        )
-        self.crop_size = (
-            config_dict["camera_params"]["crop_size"] if "crop_size" in config_dict["camera_params"] else None
-        )
+        self.distortion = (np.array(config_dict["camera_params"]["distortion"])
+                           if "distortion" in config_dict["camera_params"] else
+                           None)
+        self.crop_size = (config_dict["camera_params"]["crop_size"] if
+                          "crop_size" in config_dict["camera_params"] else None)
 
         self.crop_edge = None
         if "crop_edge" in config_dict["camera_params"].keys():
             self.crop_edge = config_dict["camera_params"]["crop_edge"]
 
-        self.color_paths, self.depth_paths, self.quadtree_paths = self.get_filepaths()
+        self.color_paths, self.depth_paths, self.quadtree_paths = (
+            self.get_filepaths())
         if len(self.color_paths) != len(self.depth_paths):
-            raise ValueError("Number of color and depth images must be the same.")
+            raise ValueError(
+                "Number of color and depth images must be the same.")
         if len(self.color_paths) != len(self.quadtree_paths):
-            raise ValueError("Number of color and quadtree files must be the same.")
+            raise ValueError(
+                "Number of color and quadtree files must be the same.")
         if self.load_embeddings:
             if len(self.color_paths) != len(self.embedding_paths):
-                raise ValueError("Mismatch between number of color images and number of embedding files.")
+                raise ValueError(
+                    "Mismatch between number of color images and number of "
+                    "embedding files.")
         self.num_imgs = len(self.color_paths)
         self.poses = self.load_poses()
 
         if self.end == -1:
             self.end = self.num_imgs
 
-        self.color_paths = self.color_paths[self.start : self.end : stride]
-        self.depth_paths = self.depth_paths[self.start : self.end : stride]
-        self.quadtree_paths = self.quadtree_paths[self.start : self.end : stride]
+        self.color_paths = self.color_paths[self.start:self.end:stride]
+        self.depth_paths = self.depth_paths[self.start:self.end:stride]
+        self.quadtree_paths = self.quadtree_paths[self.start:self.end:stride]
         if self.load_embeddings:
-            self.embedding_paths = self.embedding_paths[self.start : self.end : stride]
-        self.poses = self.poses[self.start : self.end : stride]
-        # Tensor of retained indices (indices of frames and poses that were retained)
-        self.retained_inds = torch.arange(self.num_imgs)[self.start : self.end : stride]
+            self.embedding_paths = self.embedding_paths[self.start:self.
+                                                        end:stride]
+        self.poses = self.poses[self.start:self.end:stride]
+        # Tensor of retained indices (indices of frames and poses that were
+        # retained)
+        self.retained_inds = torch.arange(
+            self.num_imgs)[self.start:self.end:stride]
         # Update self.num_images after subsampling the dataset
         self.num_imgs = len(self.color_paths)
 
@@ -211,8 +222,11 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         raise NotImplementedError
 
     def _preprocess_color(self, color: np.ndarray):
-        r"""Preprocesses the color image by resizing to :math:`(H, W, C)`, (optionally) normalizing values to
-        :math:`[0, 1]`, and (optionally) using channels first :math:`(C, H, W)` representation.
+        r"""Preprocess the color image.
+
+        This resizes to :math:`(H, W, C)`, optionally normalizes values to
+        :math:`[0, 1]`, and optionally converts to channels-first
+        :math:`(C, H, W)` representation.
 
         Args:
             color (np.ndarray): Raw input rgb image
@@ -222,7 +236,8 @@ class GradSLAMDataset(torch.utils.data.Dataset):
 
         Shape:
             - Input: :math:`(H_\text{old}, W_\text{old}, C)`
-            - Output: :math:`(H, W, C)` if `self.channels_first == False`, else :math:`(C, H, W)`.
+            - Output: :math:`(H, W, C)` if `self.channels_first == False`,
+              else :math:`(C, H, W)`.
         """
         color = cv2.resize(
             color,
@@ -236,8 +251,11 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         return color
 
     def _preprocess_depth(self, depth: np.ndarray):
-        r"""Preprocesses the depth image by resizing, adding channel dimension, and scaling values to meters. Optionally
-        converts depth from channels last :math:`(H, W, 1)` to channels first :math:`(1, H, W)` representation.
+        r"""Preprocess the depth image.
+
+        This resizes, adds a channel dimension, and scales values to meters.
+        It can also convert channels-last :math:`(H, W, 1)` depth to
+        channels-first :math:`(1, H, W)` representation.
 
         Args:
             depth (np.ndarray): Raw depth image
@@ -247,7 +265,8 @@ class GradSLAMDataset(torch.utils.data.Dataset):
 
         Shape:
             - depth: :math:`(H_\text{old}, W_\text{old})`
-            - Output: :math:`(H, W, 1)` if `self.channels_first == False`, else :math:`(1, H, W)`.
+            - Output: :math:`(H, W, 1)` if `self.channels_first == False`,
+              else :math:`(1, H, W)`.
         """
         depth = cv2.resize(
             depth.astype(float),
@@ -260,8 +279,10 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         return depth / self.png_depth_scale
 
     def _preprocess_poses(self, poses: torch.Tensor):
-        r"""Preprocesses the poses by setting first pose in a sequence to identity and computing the relative
-        homogenous transformation for all other poses.
+        r"""Preprocess poses relative to the first pose.
+
+        This sets the first pose in a sequence to identity and computes the
+        relative homogeneous transformation for all other poses.
 
         Args:
             poses (torch.Tensor): Pose matrices to be preprocessed
@@ -293,8 +314,9 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         return K
 
     def read_embedding_from_file(self, embedding_path: str):
-        """
-        Read embedding from file and process it. To be implemented in subclass for each dataset separately.
+        """Read and process an embedding file.
+
+        This should be implemented in each dataset subclass.
         """
         raise NotImplementedError
 
@@ -322,7 +344,8 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         depth = self._preprocess_depth(depth)
         depth = torch.from_numpy(depth)
 
-        K = datautils.scale_intrinsics(K, self.height_downsample_ratio, self.width_downsample_ratio)
+        K = datautils.scale_intrinsics(K, self.height_downsample_ratio,
+                                       self.width_downsample_ratio)
         intrinsics = torch.eye(4).to(K)
         intrinsics[:3, :3] = K
 
@@ -332,14 +355,16 @@ class GradSLAMDataset(torch.utils.data.Dataset):
         pose = self.transformed_poses[index]
 
         if self.load_embeddings:
-            embedding = self.read_embedding_from_file(self.embedding_paths[index])
+            embedding = self.read_embedding_from_file(
+                self.embedding_paths[index])
             return (
                 color.to(self.device).type(self.dtype),
                 depth.to(self.device).type(self.dtype),
                 quadtree.to(self.device),
                 intrinsics.to(self.device).type(self.dtype),
                 pose.to(self.device).type(self.dtype),
-                embedding.to(self.device),  # Allow embedding to be another dtype
+                embedding.to(
+                    self.device),  # Allow embedding to be another dtype
                 # self.retained_inds[index].item(),
             )
 

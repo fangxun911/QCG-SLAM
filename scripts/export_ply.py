@@ -10,11 +10,11 @@ C0 = 0.28209479177387814
 
 
 def rgb_to_spherical_harmonic(rgb):
-    return (rgb-0.5) / C0
+    return (rgb - 0.5) / C0
 
 
 def spherical_harmonic_to_rgb(sh):
-    return sh*C0 + 0.5
+    return sh * C0 + 0.5
 
 
 def save_ply(path, means, scales, rotations, rgbs, opacities, normals=None):
@@ -26,17 +26,31 @@ def save_ply(path, means, scales, rotations, rgbs, opacities, normals=None):
     if scales.shape[1] == 1:
         scales = np.tile(scales, (1, 3))
 
-    attrs = ['x', 'y', 'z',
-             'nx', 'ny', 'nz',
-             'f_dc_0', 'f_dc_1', 'f_dc_2',
-             'opacity',
-             'scale_0', 'scale_1', 'scale_2',
-             'rot_0', 'rot_1', 'rot_2', 'rot_3',]
+    attrs = [
+        'x',
+        'y',
+        'z',
+        'nx',
+        'ny',
+        'nz',
+        'f_dc_0',
+        'f_dc_1',
+        'f_dc_2',
+        'opacity',
+        'scale_0',
+        'scale_1',
+        'scale_2',
+        'rot_0',
+        'rot_1',
+        'rot_2',
+        'rot_3',
+    ]
 
     dtype_full = [(attribute, 'f4') for attribute in attrs]
     elements = np.empty(means.shape[0], dtype=dtype_full)
 
-    attributes = np.concatenate((means, normals, colors, opacities, scales, rotations), axis=1)
+    attributes = np.concatenate(
+        (means, normals, colors, opacities, scales, rotations), axis=1)
     elements[:] = list(map(tuple, attributes))
     el = PlyElement.describe(elements, 'vertex')
     PlyData([el]).write(path)
@@ -54,7 +68,8 @@ if __name__ == "__main__":
     args = parse_args()
 
     # Load SplaTAM config
-    experiment = SourceFileLoader(os.path.basename(args.config), args.config).load_module()
+    experiment = SourceFileLoader(os.path.basename(args.config),
+                                  args.config).load_module()
     config = experiment.config
     work_path = config['workdir']
     run_name = config['run_name']

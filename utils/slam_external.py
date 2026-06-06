@@ -10,7 +10,8 @@
 # For inquiries contact  george.drettakis@inria.fr
 
 #######################################################################################################################
-##### NOTE: CODE IN THIS FILE IS NOT INCLUDED IN THE OVERALL PROJECT'S MIT LICENSE #####
+# #### NOTE: CODE IN THIS FILE IS NOT INCLUDED IN THE OVERALL PROJECT'S MIT
+# LICENSE #####
 ##### USE OF THIS CODE FOLLOWS THE COPYRIGHT NOTICE ABOVE #####
 #######################################################################################################################
 """
@@ -23,7 +24,8 @@ from math import exp
 
 
 def build_rotation(q):
-    norm = torch.sqrt(q[:, 0] * q[:, 0] + q[:, 1] * q[:, 1] + q[:, 2] * q[:, 2] + q[:, 3] * q[:, 3])
+    norm = torch.sqrt(q[:, 0] * q[:, 0] + q[:, 1] * q[:, 1] +
+                      q[:, 2] * q[:, 2] + q[:, 3] * q[:, 3])
     q = q / norm[:, None]
     rot = torch.zeros((q.size(0), 3, 3), device=q.device)
     r = q[:, 0]
@@ -43,23 +45,27 @@ def build_rotation(q):
 
 
 def calc_mse(img1, img2):
-    return ((img1 - img2) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
+    return ((img1 - img2)**2).view(img1.shape[0], -1).mean(1, keepdim=True)
 
 
 def calc_psnr(img1, img2):
-    mse = ((img1 - img2) ** 2).view(img1.shape[0], -1).mean(1, keepdim=True)
+    mse = ((img1 - img2)**2).view(img1.shape[0], -1).mean(1, keepdim=True)
     return 20 * torch.log10(1.0 / torch.sqrt(mse))
 
 
 def gaussian(window_size, sigma):
-    gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
+    gauss = torch.Tensor([
+        exp(-(x - window_size // 2)**2 / float(2 * sigma**2))
+        for x in range(window_size)
+    ])
     return gauss / gauss.sum()
 
 
 def create_window(window_size, channel):
     _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
     _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-    window = Variable(_2D_window.expand(channel, 1, window_size, window_size).contiguous())
+    window = Variable(
+        _2D_window.expand(channel, 1, window_size, window_size).contiguous())
     return window
 
 
@@ -82,14 +88,19 @@ def _ssim(img1, img2, window, window_size, channel, size_average=True):
     mu2_sq = mu2.pow(2)
     mu1_mu2 = mu1 * mu2
 
-    sigma1_sq = func.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
-    sigma2_sq = func.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
-    sigma12 = func.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
+    sigma1_sq = func.conv2d(
+        img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+    sigma2_sq = func.conv2d(
+        img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+    sigma12 = func.conv2d(
+        img1 * img2, window, padding=window_size // 2, groups=channel) - mu1_mu2
 
-    c1 = 0.01 ** 2
-    c2 = 0.03 ** 2
+    c1 = 0.01**2
+    c2 = 0.03**2
 
-    ssim_map = ((2 * mu1_mu2 + c1) * (2 * sigma12 + c2)) / ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
+    ssim_map = ((2 * mu1_mu2 + c1) *
+                (2 * sigma12 + c2)) / ((mu1_sq + mu2_sq + c1) *
+                                       (sigma1_sq + sigma2_sq + c2))
 
     if size_average:
         return ssim_map.mean()
@@ -124,21 +135,27 @@ def cat_params_to_optimizer(new_params, params, optimizer):
         group = [g for g in optimizer.param_groups if g['name'] == k][0]
         stored_state = optimizer.state.get(group['params'][0], None)
         if stored_state is not None:
-            stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(v)), dim=0)
-            stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(v)), dim=0)
+            stored_state["exp_avg"] = torch.cat(
+                (stored_state["exp_avg"], torch.zeros_like(v)), dim=0)
+            stored_state["exp_avg_sq"] = torch.cat(
+                (stored_state["exp_avg_sq"], torch.zeros_like(v)), dim=0)
             del optimizer.state[group['params'][0]]
-            group["params"][0] = torch.nn.Parameter(torch.cat((group["params"][0], v), dim=0).requires_grad_(True))
+            group["params"][0] = torch.nn.Parameter(
+                torch.cat((group["params"][0], v), dim=0).requires_grad_(True))
             optimizer.state[group['params'][0]] = stored_state
             params[k] = group["params"][0]
         else:
-            group["params"][0] = torch.nn.Parameter(torch.cat((group["params"][0], v), dim=0).requires_grad_(True))
+            group["params"][0] = torch.nn.Parameter(
+                torch.cat((group["params"][0], v), dim=0).requires_grad_(True))
             params[k] = group["params"][0]
     return params
 
 
 def remove_points(to_remove, params, variables, optimizer):
     to_keep = ~to_remove
-    keys = [k for k in params.keys() if k not in ['cam_unnorm_rots', 'cam_trans']]
+    keys = [
+        k for k in params.keys() if k not in ['cam_unnorm_rots', 'cam_trans']
+    ]
     for k in keys:
         group = [g for g in optimizer.param_groups if g['name'] == k][0]
         stored_state = optimizer.state.get(group['params'][0], None)
@@ -146,13 +163,16 @@ def remove_points(to_remove, params, variables, optimizer):
             stored_state["exp_avg"] = stored_state["exp_avg"][to_keep]
             stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][to_keep]
             del optimizer.state[group['params'][0]]
-            group["params"][0] = torch.nn.Parameter((group["params"][0][to_keep].requires_grad_(True)))
+            group["params"][0] = torch.nn.Parameter(
+                (group["params"][0][to_keep].requires_grad_(True)))
             optimizer.state[group['params'][0]] = stored_state
             params[k] = group["params"][0]
         else:
-            group["params"][0] = torch.nn.Parameter(group["params"][0][to_keep].requires_grad_(True))
+            group["params"][0] = torch.nn.Parameter(
+                group["params"][0][to_keep].requires_grad_(True))
             params[k] = group["params"][0]
-    variables['means2D_gradient_accum'] = variables['means2D_gradient_accum'][to_keep]
+    variables['means2D_gradient_accum'] = variables['means2D_gradient_accum'][
+        to_keep]
     variables['denom'] = variables['denom'][to_keep]
     variables['max_2D_radius'] = variables['max_2D_radius'][to_keep]
     if 'timestep' in variables.keys():
@@ -166,28 +186,39 @@ def inverse_sigmoid(x):
 
 def prune_gaussians(params, variables, optimizer, iter, prune_dict):
     if iter <= prune_dict['stop_after']:
-        if (iter >= prune_dict['start_after']) and (iter % prune_dict['prune_every'] == 0):
+        if (iter >= prune_dict['start_after']) and (
+                iter % prune_dict['prune_every'] == 0):
             if iter == prune_dict['stop_after']:
                 remove_threshold = prune_dict['final_removal_opacity_threshold']
             else:
                 remove_threshold = prune_dict['removal_opacity_threshold']
             # Remove Gaussians with low opacity
-            transparent_points_ws = (torch.sigmoid(params['logit_opacities']) < remove_threshold).squeeze()
+            transparent_points_ws = (torch.sigmoid(params['logit_opacities']) <
+                                     remove_threshold).squeeze()
             if not prune_dict['prune_big']:
-                params, variables = remove_points(transparent_points_ws, params, variables, optimizer)
+                params, variables = remove_points(transparent_points_ws, params,
+                                                  variables, optimizer)
             else:
                 # Remove Gaussians that are too big
                 if iter >= prune_dict['remove_big_after']:
-                    big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
-                    to_remove = torch.logical_or(transparent_points_ws, big_points_ws)
-                params, variables = remove_points(to_remove, params, variables, optimizer)
+                    big_points_ws = torch.exp(params['log_scales']).max(
+                        dim=1).values > 0.1 * variables['scene_radius']
+                    to_remove = torch.logical_or(transparent_points_ws,
+                                                 big_points_ws)
+                params, variables = remove_points(to_remove, params, variables,
+                                                  optimizer)
             torch.cuda.empty_cache()
-        
+
         # Reset Opacities for all Gaussians 这里不执行
-        if iter > 0 and iter % prune_dict['reset_opacities_every'] == 0 and prune_dict['reset_opacities']:
-            new_params = {'logit_opacities': inverse_sigmoid(torch.ones_like(params['logit_opacities']) * 0.01)}
+        if iter > 0 and iter % prune_dict[
+                'reset_opacities_every'] == 0 and prune_dict['reset_opacities']:
+            new_params = {
+                'logit_opacities':
+                    inverse_sigmoid(
+                        torch.ones_like(params['logit_opacities']) * 0.01)
+            }
             params = update_params_and_optimizer(new_params, params, optimizer)
-    
+
     return params, variables
 
 
@@ -195,79 +226,116 @@ def densify(params, variables, optimizer, iter, densify_dict):
     if iter <= densify_dict['stop_after']:
         variables = accumulate_mean2d_gradient(variables)
         grad_thresh = densify_dict['grad_thresh']
-        if (iter >= densify_dict['start_after']) and (iter % densify_dict['densify_every'] == 0):
+        if (iter >= densify_dict['start_after']) and (
+                iter % densify_dict['densify_every'] == 0):
             grads = variables['means2D_gradient_accum'] / variables['denom']
             grads[grads.isnan()] = 0.0
-            to_clone = torch.logical_and(grads >= grad_thresh, (
-                        torch.max(torch.exp(params['log_scales']), dim=1).values <= 0.01 * variables['scene_radius']))
-            new_params = {k: v[to_clone] for k, v in params.items() if k not in ['cam_unnorm_rots', 'cam_trans']}
+            to_clone = torch.logical_and(
+                grads >= grad_thresh,
+                (torch.max(torch.exp(params['log_scales']), dim=1).values <=
+                 0.01 * variables['scene_radius']))
+            new_params = {
+                k: v[to_clone]
+                for k, v in params.items()
+                if k not in ['cam_unnorm_rots', 'cam_trans']
+            }
             params = cat_params_to_optimizer(new_params, params, optimizer)
             num_pts = params['means3D'].shape[0]
 
             padded_grad = torch.zeros(num_pts, device=params['means3D'].device)
             padded_grad[:grads.shape[0]] = grads
-            to_split = torch.logical_and(padded_grad >= grad_thresh,
-                                         torch.max(torch.exp(params['log_scales']), dim=1).values > 0.01 * variables[
-                                             'scene_radius'])
+            to_split = torch.logical_and(
+                padded_grad >= grad_thresh,
+                torch.max(torch.exp(params['log_scales']), dim=1).values >
+                0.01 * variables['scene_radius'])
             n = densify_dict['num_to_split_into']  # number to split into
-            new_params = {k: v[to_split].repeat(n, 1) for k, v in params.items() if k not in ['cam_unnorm_rots', 'cam_trans']}
+            new_params = {
+                k: v[to_split].repeat(n, 1)
+                for k, v in params.items()
+                if k not in ['cam_unnorm_rots', 'cam_trans']
+            }
             stds = torch.exp(params['log_scales'])[to_split].repeat(n, 3)
-            means = torch.zeros((stds.size(0), 3), device=params['means3D'].device)
+            means = torch.zeros((stds.size(0), 3),
+                                device=params['means3D'].device)
             samples = torch.normal(mean=means, std=stds)
-            rots = build_rotation(params['unnorm_rotations'][to_split]).repeat(n, 1, 1)
-            new_params['means3D'] += torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
-            new_params['log_scales'] = torch.log(torch.exp(new_params['log_scales']) / (0.8 * n))
+            rots = build_rotation(params['unnorm_rotations'][to_split]).repeat(
+                n, 1, 1)
+            new_params['means3D'] += torch.bmm(
+                rots, samples.unsqueeze(-1)).squeeze(-1)
+            new_params['log_scales'] = torch.log(
+                torch.exp(new_params['log_scales']) / (0.8 * n))
             params = cat_params_to_optimizer(new_params, params, optimizer)
             num_pts = params['means3D'].shape[0]
 
-            variables['means2D_gradient_accum'] = torch.zeros(num_pts, device=params['means3D'].device)
-            variables['denom'] = torch.zeros(num_pts, device=params['means3D'].device)
-            variables['max_2D_radius'] = torch.zeros(num_pts, device=params['means3D'].device)
-            to_remove = torch.cat((to_split, torch.zeros(n * to_split.sum(), dtype=torch.bool, device=params['means3D'].device)))
-            params, variables = remove_points(to_remove, params, variables, optimizer)
+            variables['means2D_gradient_accum'] = torch.zeros(
+                num_pts, device=params['means3D'].device)
+            variables['denom'] = torch.zeros(num_pts,
+                                             device=params['means3D'].device)
+            variables['max_2D_radius'] = torch.zeros(
+                num_pts, device=params['means3D'].device)
+            to_remove = torch.cat(
+                (to_split,
+                 torch.zeros(n * to_split.sum(),
+                             dtype=torch.bool,
+                             device=params['means3D'].device)))
+            params, variables = remove_points(to_remove, params, variables,
+                                              optimizer)
 
             if iter == densify_dict['stop_after']:
-                remove_threshold = densify_dict['final_removal_opacity_threshold']
+                remove_threshold = densify_dict[
+                    'final_removal_opacity_threshold']
             else:
                 remove_threshold = densify_dict['removal_opacity_threshold']
-            to_remove = (torch.sigmoid(params['logit_opacities']) < remove_threshold).squeeze()
+            to_remove = (torch.sigmoid(params['logit_opacities']) <
+                         remove_threshold).squeeze()
             if iter >= densify_dict['remove_big_after']:
-                big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
+                big_points_ws = torch.exp(params['log_scales']).max(
+                    dim=1).values > 0.1 * variables['scene_radius']
                 to_remove = torch.logical_or(to_remove, big_points_ws)
-            params, variables = remove_points(to_remove, params, variables, optimizer)
+            params, variables = remove_points(to_remove, params, variables,
+                                              optimizer)
 
             torch.cuda.empty_cache()
 
-        # Reset Opacities for all Gaussians (This is not desired for mapping on only current frame)
-        if iter > 0 and iter % densify_dict['reset_opacities_every'] == 0 and densify_dict['reset_opacities']:
-            new_params = {'logit_opacities': inverse_sigmoid(torch.ones_like(params['logit_opacities']) * 0.01)}
+        # Reset Opacities for all Gaussians (This is not desired for mapping on
+        # only current frame)
+        if iter > 0 and iter % densify_dict[
+                'reset_opacities_every'] == 0 and densify_dict[
+                    'reset_opacities']:
+            new_params = {
+                'logit_opacities':
+                    inverse_sigmoid(
+                        torch.ones_like(params['logit_opacities']) * 0.01)
+            }
             params = update_params_and_optimizer(new_params, params, optimizer)
 
     return params, variables
 
 
 def update_learning_rate(optimizer, means3D_scheduler, iteration):
-        ''' Learning rate scheduling per step '''
-        for param_group in optimizer.param_groups:
-            if param_group["name"] == "means3D":
-                lr = means3D_scheduler(iteration)
-                param_group['lr'] = lr
-                return lr
+    ''' Learning rate scheduling per step '''
+    for param_group in optimizer.param_groups:
+        if param_group["name"] == "means3D":
+            lr = means3D_scheduler(iteration)
+            param_group['lr'] = lr
+            return lr
 
 
-def get_expon_lr_func(
-    lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
-):
+def get_expon_lr_func(lr_init,
+                      lr_final,
+                      lr_delay_steps=0,
+                      lr_delay_mult=1.0,
+                      max_steps=1000000):
     """
     Copied from Plenoxels
 
     Continuous learning rate decay function. Adapted from JaxNeRF
-    The returned rate is lr_init when step=0 and lr_final when step=max_steps, and
-    is log-linearly interpolated elsewhere (equivalent to exponential decay).
+    The returned rate is lr_init when step=0 and lr_final when
+    step=max_steps. It is log-linearly interpolated elsewhere.
     If lr_delay_steps>0 then the learning rate will be scaled by some smooth
     function of lr_delay_mult, such that the initial learning rate is
-    lr_init*lr_delay_mult at the beginning of optimization but will be eased back
-    to the normal learning rate when steps>lr_delay_steps.
+    lr_init*lr_delay_mult at the beginning of optimization, but will be eased
+    back to the normal learning rate when steps>lr_delay_steps.
     :param conf: config subtree 'lr' or similar
     :param max_steps: int, the number of steps during optimization.
     :return HoF which takes step as input
@@ -280,8 +348,7 @@ def get_expon_lr_func(
         if lr_delay_steps > 0:
             # A kind of reverse cosine decay.
             delay_rate = lr_delay_mult + (1 - lr_delay_mult) * np.sin(
-                0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1)
-            )
+                0.5 * np.pi * np.clip(step / lr_delay_steps, 0, 1))
         else:
             delay_rate = 1.0
         t = np.clip(step / max_steps, 0, 1)

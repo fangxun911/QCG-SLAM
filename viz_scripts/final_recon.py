@@ -1,3 +1,14 @@
+from utils.slam_external import build_rotation
+from utils.slam_helpers import get_depth_and_silhouette
+from utils.recon_helpers import setup_camera
+from utils.common_utils import seed_everything
+from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera
+from diff_gaussian_rasterization import GaussianRasterizer as Renderer
+import open3d as o3d
+import numpy as np
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
+import torch
 import argparse
 import os
 import sys
@@ -6,20 +17,6 @@ from importlib.machinery import SourceFileLoader
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, _BASE_DIR)
-
-import torch
-import torch.nn.functional as F
-import matplotlib.pyplot as plt
-import numpy as np
-import open3d as o3d
-
-from diff_gaussian_rasterization import GaussianRasterizer as Renderer
-from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera
-
-from utils.common_utils import seed_everything
-from utils.recon_helpers import setup_camera
-from utils.slam_helpers import get_depth_and_silhouette
-from utils.slam_external import build_rotation
 
 
 def load_camera(cfg, scene_path):
@@ -40,14 +37,19 @@ def load_camera(cfg, scene_path):
 def load_scene_data(scene_path, first_frame_w2c, intrinsics):
     # Load Scene Data
     all_params = dict(np.load(scene_path, allow_pickle=True))
-    all_params = {k: torch.tensor(all_params[k]).cuda().float() for k in all_params.keys()}
+    all_params = {
+        k: torch.tensor(all_params[k]).cuda().float()
+        for k in all_params.keys()
+    }
     intrinsics = torch.tensor(intrinsics).cuda().float()
     first_frame_w2c = torch.tensor(first_frame_w2c).cuda().float()
 
-    keys = [k for k in all_params.keys() if
-            k not in ['org_width', 'org_height', 'w2c', 'intrinsics', 
-                      'gt_w2c_all_frames', 'cam_unnorm_rots',
-                      'cam_trans', 'keyframe_time_indices']]
+    keys = [
+        k for k in all_params.keys() if k not in [
+            'org_width', 'org_height', 'w2c', 'intrinsics', 'gt_w2c_all_frames',
+            'cam_unnorm_rots', 'cam_trans', 'keyframe_time_indices'
+        ]
+    ]
 
     params = all_params
     for k in keys:
@@ -81,12 +83,18 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics):
         'means2D': torch.zeros_like(params['means3D'], device="cuda")
     }
     depth_rendervar = {
-        'means3D': params['means3D'],
-        'colors_precomp': get_depth_and_silhouette(params['means3D'], first_frame_w2c),
-        'rotations': torch.nn.functional.normalize(params['unnorm_rotations']),
-        'opacities': torch.sigmoid(params['logit_opacities']),
-        'scales': torch.exp(log_scales),
-        'means2D': torch.zeros_like(params['means3D'], device="cuda")
+        'means3D':
+            params['means3D'],
+        'colors_precomp':
+            get_depth_and_silhouette(params['means3D'], first_frame_w2c),
+        'rotations':
+            torch.nn.functional.normalize(params['unnorm_rotations']),
+        'opacities':
+            torch.sigmoid(params['logit_opacities']),
+        'scales':
+            torch.exp(log_scales),
+        'means2D':
+            torch.zeros_like(params['means3D'], device="cuda")
     }
     return rendervar, depth_rendervar, all_w2cs
 
@@ -95,31 +103,36 @@ def make_lineset(all_pts, all_cols, num_lines):
     linesets = []
     for pts, cols, num_lines in zip(all_pts, all_cols, num_lines):
         lineset = o3d.geometry.LineSet()
-        lineset.points = o3d.utility.Vector3dVector(np.ascontiguousarray(pts, np.float64))
-        lineset.colors = o3d.utility.Vector3dVector(np.ascontiguousarray(cols, np.float64))
+        lineset.points = o3d.utility.Vector3dVector(
+            np.ascontiguousarray(pts, np.float64))
+        lineset.colors = o3d.utility.Vector3dVector(
+            np.ascontiguousarray(cols, np.float64))
         pt_indices = np.arange(len(lineset.points))
-        line_indices = np.stack((pt_indices, pt_indices - num_lines), -1)[num_lines:]
-        lineset.lines = o3d.utility.Vector2iVector(np.ascontiguousarray(line_indices, np.int32))
+        line_indices = np.stack((pt_indices, pt_indices - num_lines),
+                                -1)[num_lines:]
+        lineset.lines = o3d.utility.Vector2iVector(
+            np.ascontiguousarray(line_indices, np.int32))
         linesets.append(lineset)
     return linesets
 
 
 def render(w2c, k, timestep_data, timestep_depth_data, cfg):
     with torch.no_grad():
-        cam = setup_camera(cfg['viz_w'], cfg['viz_h'], k, w2c, cfg['viz_near'], cfg['viz_far'])
-        white_bg_cam = Camera(
-            image_height=cam.image_height,
-            image_width=cam.image_width,
-            tanfovx=cam.tanfovx,
-            tanfovy=cam.tanfovy,
-            bg=torch.tensor([1, 1, 1], dtype=torch.float32, device="cuda"),
-            scale_modifier=cam.scale_modifier,
-            viewmatrix=cam.viewmatrix,
-            projmatrix=cam.projmatrix,
-            sh_degree=cam.sh_degree,
-            campos=cam.campos,
-            prefiltered=cam.prefiltered
-        )
+        cam = setup_camera(cfg['viz_w'], cfg['viz_h'], k, w2c, cfg['viz_near'],
+                           cfg['viz_far'])
+        white_bg_cam = Camera(image_height=cam.image_height,
+                              image_width=cam.image_width,
+                              tanfovx=cam.tanfovx,
+                              tanfovy=cam.tanfovy,
+                              bg=torch.tensor([1, 1, 1],
+                                              dtype=torch.float32,
+                                              device="cuda"),
+                              scale_modifier=cam.scale_modifier,
+                              viewmatrix=cam.viewmatrix,
+                              projmatrix=cam.projmatrix,
+                              sh_degree=cam.sh_degree,
+                              campos=cam.campos,
+                              prefiltered=cam.prefiltered)
         im, _, depth, = Renderer(raster_settings=white_bg_cam)(**timestep_data)
         depth_sil, _, _, = Renderer(raster_settings=cam)(**timestep_depth_data)
         differentiable_depth = depth_sil[0, :, :].unsqueeze(0)
@@ -150,7 +163,7 @@ def rgbd2pcd(color, depth, w2c, intrinsics, cfg):
 
     # Convert to Open3D format
     pts = o3d.utility.Vector3dVector(pts.contiguous().double().cpu().numpy())
-    
+
     # Colorize point cloud
     if cfg['render_mode'] == 'depth':
         cols = z_depth
@@ -161,11 +174,13 @@ def rgbd2pcd(color, depth, w2c, intrinsics, cfg):
         scalarMap = plt.cm.ScalarMappable(norm=cNorm, cmap=colormap)
         cols = scalarMap.to_rgba(cols.contiguous().cpu().numpy())[:, :3]
         bg_mask = bg_mask.cpu().numpy()
-        cols = cols * bg_mask[:, None] + (1 - bg_mask[:, None]) * np.array([1.0, 1.0, 1.0])
+        cols = cols * bg_mask[:, None] + (1 - bg_mask[:, None]) * np.array(
+            [1.0, 1.0, 1.0])
         cols = o3d.utility.Vector3dVector(cols)
     else:
         cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3)
-        cols = o3d.utility.Vector3dVector(cols.contiguous().double().cpu().numpy())
+        cols = o3d.utility.Vector3dVector(
+            cols.contiguous().double().cpu().numpy())
     return pts, cols
 
 
@@ -177,7 +192,7 @@ def visualize(scene_path, cfg):
 
     # vis.create_window()
     vis = o3d.visualization.Visualizer()
-    vis.create_window(width=int(cfg['viz_w'] * cfg['view_scale']), 
+    vis.create_window(width=int(cfg['viz_w'] * cfg['view_scale']),
                       height=int(cfg['viz_h'] * cfg['view_scale']),
                       visible=True)
 
@@ -199,11 +214,13 @@ def visualize(scene_path, cfg):
         cam_colormap = plt.get_cmap('cool')
         norm_factor = 0.5
         for i_t in range(num_t):
-            frustum = o3d.geometry.LineSet.create_camera_visualization(w, h, k, all_w2cs[i_t], frustum_size)
-            frustum.paint_uniform_color(np.array(cam_colormap(i_t * norm_factor / num_t)[:3]))
+            frustum = o3d.geometry.LineSet.create_camera_visualization(
+                w, h, k, all_w2cs[i_t], frustum_size)
+            frustum.paint_uniform_color(
+                np.array(cam_colormap(i_t * norm_factor / num_t)[:3]))
             vis.add_geometry(frustum)
             cam_centers.append(np.linalg.inv(all_w2cs[i_t])[:3, 3])
-        
+
         # Initialize Camera Trajectory
         num_lines = [1]
         total_num_lines = num_t - 1
@@ -211,7 +228,10 @@ def visualize(scene_path, cfg):
         line_colormap = plt.get_cmap('cool')
         norm_factor = 0.5
         for line_t in range(total_num_lines):
-            cols.append(np.array(line_colormap((line_t * norm_factor / total_num_lines)+norm_factor)[:3]))
+            cols.append(
+                np.array(
+                    line_colormap((line_t * norm_factor / total_num_lines) +
+                                  norm_factor)[:3]))
         cols = np.array(cols)
         all_cols = [cols]
         out_pts = [np.array(cam_centers)]
@@ -236,7 +256,8 @@ def visualize(scene_path, cfg):
     cparams.intrinsic.intrinsic_matrix = view_k
     cparams.intrinsic.height = int(cfg['viz_h'] * cfg['view_scale'])
     cparams.intrinsic.width = int(cfg['viz_w'] * cfg['view_scale'])
-    view_control.convert_from_pinhole_camera_parameters(cparams, allow_arbitrary=True)
+    view_control.convert_from_pinhole_camera_parameters(cparams,
+                                                        allow_arbitrary=True)
 
     render_options = vis.get_render_option()
     render_options.point_size = cfg['view_scale']
@@ -251,14 +272,17 @@ def visualize(scene_path, cfg):
         w2c = cam_params.extrinsic
 
         if cfg['render_mode'] == 'centers':
-            pts = o3d.utility.Vector3dVector(scene_data['means3D'].contiguous().double().cpu().numpy())
-            cols = o3d.utility.Vector3dVector(scene_data['colors_precomp'].contiguous().double().cpu().numpy())
+            pts = o3d.utility.Vector3dVector(
+                scene_data['means3D'].contiguous().double().cpu().numpy())
+            cols = o3d.utility.Vector3dVector(
+                scene_data['colors_precomp'].contiguous().double().cpu().numpy(
+                ))
         else:
             im, depth, sil = render(w2c, k, scene_data, scene_depth_data, cfg)
             if cfg['show_sil']:
-                im = (1-sil).repeat(3, 1, 1)
+                im = (1 - sil).repeat(3, 1, 1)
             pts, cols = rgbd2pcd(im, depth, w2c, k, cfg)
-        
+
         # Update Gaussians
         pcd.points = pts
         pcd.colors = cols
@@ -282,16 +306,14 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    experiment = SourceFileLoader(
-        os.path.basename(args.experiment), args.experiment
-    ).load_module()
+    experiment = SourceFileLoader(os.path.basename(args.experiment),
+                                  args.experiment).load_module()
 
     seed_everything(seed=experiment.config["seed"])
 
     if "scene_path" not in experiment.config:
-        results_dir = os.path.join(
-            experiment.config["workdir"], experiment.config["run_name"]
-        )
+        results_dir = os.path.join(experiment.config["workdir"],
+                                   experiment.config["run_name"])
         scene_path = os.path.join(results_dir, "params.npz")
     else:
         scene_path = experiment.config["scene_path"]

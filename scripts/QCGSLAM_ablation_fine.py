@@ -1,3 +1,30 @@
+from segment_model.networks.dinov2_seg import DINO2SEG
+from diff_gaussian_rasterization import GaussianRasterizer as Renderer
+from utils.slam_external import (calc_ssim, build_rotation, prune_gaussians,
+                                 densify)
+from utils.slam_helpers import (transformed_params2rendervar,
+                                transformed_params2depthplussilhouette,
+                                transform_to_frame, l1_loss_v1,
+                                matrix_to_quaternion)
+from utils.recon_helpers import setup_camera
+from utils.keyframe_selection import keyframe_selection_overlap
+from utils.eval_helpers import report_loss, report_progress, eval
+from utils.common_utils import seed_everything, save_params_ckpt, save_params
+from datasets.gradslam_datasets import (load_dataset_config, ICLDataset,
+                                        ReplicaDataset, ReplicaV2Dataset,
+                                        AzureKinectDataset, ScannetDataset,
+                                        Ai2thorDataset, Record3DDataset,
+                                        RealsenseDataset, TUMDataset,
+                                        ScannetPPDataset, NeRFCaptureDataset)
+import wandb
+from tqdm import tqdm
+import torchvision
+import torch.nn.functional as F
+import torch
+import numpy as np
+from PIL import Image, ImageDraw
+import matplotlib.pyplot as plt
+import cv2
 import argparse
 import os
 import shutil
@@ -15,33 +42,6 @@ for p in sys.path:
     print(p)
 
 setproctitle.setproctitle("fx_quadtree_splatam")
-
-import cv2
-import matplotlib.pyplot as plt
-from PIL import Image, ImageDraw
-import numpy as np
-import torch
-import torch.nn.functional as F
-import torchvision
-from tqdm import tqdm
-import wandb
-
-from datasets.gradslam_datasets import (load_dataset_config, ICLDataset, ReplicaDataset, ReplicaV2Dataset, AzureKinectDataset,
-                                        ScannetDataset, Ai2thorDataset, Record3DDataset, RealsenseDataset, TUMDataset,
-                                        ScannetPPDataset, NeRFCaptureDataset)
-from utils.common_utils import seed_everything, save_params_ckpt, save_params
-from utils.eval_helpers import report_loss, report_progress, eval
-from utils.keyframe_selection import keyframe_selection_overlap
-from utils.recon_helpers import setup_camera
-from utils.slam_helpers import (
-    transformed_params2rendervar, transformed_params2depthplussilhouette,
-    transform_to_frame, l1_loss_v1, matrix_to_quaternion
-)
-from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
-
-from diff_gaussian_rasterization import GaussianRasterizer as Renderer
-from segment_model.networks.dinov2_seg import DINO2SEG
-
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -69,9 +69,6 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
         return NeRFCaptureDataset(basedir, sequence, **kwargs)
     else:
         raise ValueError(f"Unknown dataset name {config_dict['dataset_name']}")
-    
-
-
 
 
 def calculate_contrast(img_tensor):
@@ -85,10 +82,12 @@ def calculate_contrast(img_tensor):
     # print(contrast_range)
     return contrast_range
 
+
 def split_image(img, threshold):
     # 分割图像，直到每个区域的对比度小于阈值
     bbox = torch.tensor([0, 0, img.shape[3], img.shape[2]]).cuda()
     return _split_image(img, threshold, bbox)
+
 
 def _split_image(img, threshold, bbox):
     x, y, w, h = bbox
@@ -105,14 +104,35 @@ def _split_image(img, threshold, bbox):
     if contrast < threshold or S_box < 4:
         return bbox.unsqueeze(0)
     else:
-        upper_left = torch.tensor([x, y, torch.div(w + x, 2, rounding_mode='floor'), torch.div(h + y, 2, rounding_mode='floor')]).cuda()
-        upper_right = torch.tensor([torch.div(w + x, 2, rounding_mode='floor'), y, w, torch.div(h + y, 2, rounding_mode='floor')]).cuda()
-        bottom_left = torch.tensor([x, torch.div(h + y, 2, rounding_mode='floor'), torch.div(w + x, 2, rounding_mode='floor'), h]).cuda()
-        bottom_right = torch.tensor([torch.div(w + x, 2, rounding_mode='floor'), torch.div(h + y, 2, rounding_mode='floor'), w, h]).cuda()
-        return torch.cat([_split_image(img, threshold, upper_left),
-                          _split_image(img, threshold, upper_right),
-                          _split_image(img, threshold, bottom_left),
-                          _split_image(img, threshold, bottom_right)], dim=0)
+        upper_left = torch.tensor([
+            x, y,
+            torch.div(w + x, 2, rounding_mode='floor'),
+            torch.div(h + y, 2, rounding_mode='floor')
+        ]).cuda()
+        upper_right = torch.tensor([
+            torch.div(w + x, 2, rounding_mode='floor'), y, w,
+            torch.div(h + y, 2, rounding_mode='floor')
+        ]).cuda()
+        bottom_left = torch.tensor([
+            x,
+            torch.div(h + y, 2, rounding_mode='floor'),
+            torch.div(w + x, 2, rounding_mode='floor'), h
+        ]).cuda()
+        bottom_right = torch.tensor([
+            torch.div(w + x, 2, rounding_mode='floor'),
+            torch.div(h + y, 2, rounding_mode='floor'), w, h
+        ]).cuda()
+        # yapf: disable
+        return torch.cat(
+            [
+                _split_image(img, threshold, upper_left),
+                _split_image(img, threshold, upper_right),
+                _split_image(img, threshold, bottom_left),
+                _split_image(img, threshold, bottom_right)
+            ],
+            dim=0)
+        # yapf: enable
+
 
 def visualize_quadtree(img, quadtree):
     to_pil = torchvision.transforms.ToPILImage()
@@ -123,9 +143,13 @@ def visualize_quadtree(img, quadtree):
     return pil_img
 
 
-
-def get_quadtree_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, 
-                            mask=None, compute_mean_sq_dist=False, 
+def get_quadtree_pointcloud(color,
+                            depth,
+                            intrinsics,
+                            w2c,
+                            transform_pts=True,
+                            mask=None,
+                            compute_mean_sq_dist=False,
                             mean_sq_dist_method="projective",
                             quadtree_contrast_threshold=None,
                             time_idx=None,
@@ -140,28 +164,28 @@ def get_quadtree_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
         # Compute indices of pixels
         # start_split_time = time.time()
         # 这里改为预处理输入
-        # quadtree_tensor = split_image(color.clone().unsqueeze(0), quadtree_contrast_threshold)
-        '''
-        if time_idx != None:
-            quadtree_file_path = "quadtree_preprocess/%s/%s/frame00%04d.pt"%(scene_name, quadtree_contrast_threshold, time_idx)
-            quadtree_tensor = torch.load(quadtree_file_path, map_location="cuda:0").detach()
-        else:
-            quadtree_file_path = 'quadtree_preprocess/%s/%s/frame000000.pt'%(scene_name, quadtree_contrast_threshold)
-            quadtree_tensor = torch.load(quadtree_file_path, map_location='cuda:0').detach()
-        '''
-        quadtree_file_path = "quadtree_preprocess/%s/threshold_%s/frame00%04d.pt"%(scene_name, quadtree_contrast_threshold, time_idx)
-        quadtree_tensor = torch.load(quadtree_file_path, map_location="cuda:0").detach()
+        # quadtree_tensor = split_image(color.clone().unsqueeze(0),
+        # quadtree_contrast_threshold)
+        quadtree_file_path = (
+            "quadtree_preprocess/%s/threshold_%s/frame00%04d.pt" %
+            (scene_name, quadtree_contrast_threshold, time_idx))
+        quadtree_tensor = torch.load(quadtree_file_path,
+                                     map_location="cuda:0").detach()
         # print(time.time() - start_split_time, "\n")
         # quadtree_tensor = torch.tensor(quadtree).to(device) # [N, 4]维度，左上和右下坐标
         # x_grid 和 y_grid: 四叉树每个叶节点的中心点坐标
-        x_grid = torch.div(quadtree_tensor[:, 0] + quadtree_tensor[:, 2], 2, rounding_mode='floor') # 宽坐标
-        y_grid = torch.div(quadtree_tensor[:, 1] + quadtree_tensor[:, 3], 2, rounding_mode='floor') # 高坐标
-        xx = (x_grid - CX)/FX
-        yy = (y_grid - CY)/FY
+        x_grid = torch.div(quadtree_tensor[:, 0] + quadtree_tensor[:, 2],
+                           2,
+                           rounding_mode='floor')  # 宽坐标
+        y_grid = torch.div(quadtree_tensor[:, 1] + quadtree_tensor[:, 3],
+                           2,
+                           rounding_mode='floor')  # 高坐标
+        xx = (x_grid - CX) / FX
+        yy = (y_grid - CY) / FY
         xx = xx.reshape(-1)
         yy = yy.reshape(-1)
         # depth_z = depth[0].reshape(-1)
-        depth_z = depth[0, y_grid, x_grid] # [C, H, W] 所以先y后x
+        depth_z = depth[0, y_grid, x_grid]  # [C, H, W] 所以先y后x
         # if mask is not None:
         #     mask = mask[y_grid, x_grid] # mask 原本是 (H, W)
 
@@ -171,21 +195,26 @@ def get_quadtree_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
             pix_ones = torch.ones(pts_cam.shape[0], 1, device=device).float()
             pts4 = torch.cat((pts_cam, pix_ones), dim=1)
             c2w = torch.inverse(w2c)
-            pts = (c2w @ pts4.T).T[:, :3] # pts 是世界坐标系下的3D点
+            pts = (c2w @ pts4.T).T[:, :3]  # pts 是世界坐标系下的3D点
         else:
             pts = pts_cam
 
-        # Compute mean squared distance for initializing the scale of the Gaussians
+        # Compute mean squared distance for initializing the scale of the
+        # Gaussians
         if compute_mean_sq_dist:
             if mean_sq_dist_method == "projective":
                 # Projective Geometry (this is fast, farther -> larger radius)
-                scale_gaussian = depth_z / ((FX + FY)/2)
+                scale_gaussian = depth_z / ((FX + FY) / 2)
                 # 一个像素->多个像素
                 if params is None:
                     # 不考虑旧高斯的位置
-                    node_duijiaoxian = torch.sqrt((quadtree_tensor[:, 2] - quadtree_tensor[:, 0])**2 + (quadtree_tensor[:, 3] - quadtree_tensor[:, 1])**2).detach()
+                    node_duijiaoxian = torch.sqrt(
+                        (quadtree_tensor[:, 2] - quadtree_tensor[:, 0])**2 +
+                        (quadtree_tensor[:, 3] -
+                         quadtree_tensor[:, 1])**2).detach()
                     node_radius = node_duijiaoxian * 0.5
-                    # node_radius = torch.maximum(node_radius, torch.ones_like(node_radius))
+                    # node_radius = torch.maximum(node_radius,
+                    # torch.ones_like(node_radius))
                     scale_gaussian = scale_gaussian * node_radius
                     mean3_sq_dist = scale_gaussian**2
                     if mask is not None:
@@ -194,42 +223,61 @@ def get_quadtree_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
                     del quadtree_tensor, node_duijiaoxian, node_radius
                     torch.cuda.empty_cache()
                 else:
-                    node_duijiaoxian = torch.sqrt((quadtree_tensor[:, 2] - quadtree_tensor[:, 0])**2 + (quadtree_tensor[:, 3] - quadtree_tensor[:, 1])**2)
+                    node_duijiaoxian = torch.sqrt(
+                        (quadtree_tensor[:, 2] - quadtree_tensor[:, 0])**2 +
+                        (quadtree_tensor[:, 3] - quadtree_tensor[:, 1])**2)
                     node_radius = node_duijiaoxian * 0.5
                     # 这里的 scale_gaussian_tree 是四叉树叶节点的半径r
                     scale_gaussian_tree = scale_gaussian * node_radius
                     # 下面考虑最近邻距离
-                    # k = min(params['log_scales'].shape[0], int(2 * 10 ** 10 / pts.shape[0])) # 没有那么多算力处理这么多点，所以取后k个点
-                    # old_radius = torch.exp(params['log_scales'][-k:].detach()).max(dim=1).values
+                    # k = min(params['log_scales'].shape[0], int(2 * 10 ** 10 /
+                    # pts.shape[0])) # 没有那么多算力处理这么多点，所以取后k个点
+                    # old_radius = torch.exp(
+                    #     params['log_scales'][-k:].detach()).max(dim=1).values
                     # old_points = params['means3D'][-k:].detach()
                     if mask is not None:
                         mask = mask[y_grid, x_grid]
                         new_points = pts[mask].detach()
-                        # print("new quadtree points: ", new_points.shape[0], "~~~~~\n")
+                        # print("new quadtree points: ", new_points.shape[0],
+                        # "~~~~~\n")
                         if new_points.shape[0] == 0:
                             return new_points, scale_gaussian**2
-                        k = min(params['log_scales'].shape[0], int(10 ** 9 / new_points.shape[0])) # 没有那么多算力处理这么多点，所以取后k个点
-                        old_radius = torch.exp(params['log_scales'][-k:].detach()).max(dim=1).values
+                        k = min(
+                            params['log_scales'].shape[0],
+                            int(10**9 /
+                                new_points.shape[0]))  # 没有那么多算力处理这么多点，所以取后k个点
+                        old_radius = torch.exp(
+                            params['log_scales'][-k:].detach()).max(
+                                dim=1).values
                         old_points = params['means3D'][-k:].detach()
-                        # torch.save({"new_points": new_points, "old_points": old_points, "old_radius": old_radius}, "cal_distance.1122.pt")
+                        # torch.save({"new_points": new_points, "old_points":
+                        # old_points, "old_radius": old_radius},
+                        # "cal_distance.1122.pt")
                         distances = torch.cdist(new_points, old_points)
-                        scale_gaussian_tree_mask = scale_gaussian_tree[mask].detach()
+                        scale_gaussian_tree_mask = scale_gaussian_tree[
+                            mask].detach()
                         scale_gaussian_mask = scale_gaussian[mask].detach()
-                    else:    
+                    else:
                         distances = torch.cdist(pts, old_points)
                     closest_distance = torch.min(distances, dim=1)
-                    neighborDistance = closest_distance.values - old_radius[closest_distance.indices]
+                    neighborDistance = closest_distance.values - old_radius[
+                        closest_distance.indices]
                     # 综合这3者
-                    scale_gaussian = torch.maximum(torch.minimum(scale_gaussian_tree_mask, neighborDistance), scale_gaussian_mask)
+                    scale_gaussian = torch.maximum(
+                        torch.minimum(scale_gaussian_tree_mask,
+                                      neighborDistance), scale_gaussian_mask)
                     mean3_sq_dist = scale_gaussian**2
-                    del distances, closest_distance, neighborDistance, quadtree_tensor
+                    del distances, closest_distance, neighborDistance
+                    del quadtree_tensor
                     torch.cuda.empty_cache()
 
             else:
-                raise ValueError(f"Unknown mean_sq_dist_method {mean_sq_dist_method}")
-        
+                raise ValueError(
+                    f"Unknown mean_sq_dist_method {mean_sq_dist_method}")
+
         # Colorize point cloud
-        # cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
+        # cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) ->
+        # (H, W, C) -> (H * W, C)
         cols = color[:, y_grid, x_grid]
         # 给点云上色，后3列为rgb值
         point_cld = torch.cat((pts, torch.transpose(cols, 0, 1)), -1)
@@ -248,9 +296,14 @@ def get_quadtree_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
             return point_cld
 
 
-
-def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, 
-                   mask=None, compute_mean_sq_dist=False, mean_sq_dist_method="projective"):
+def get_pointcloud(color,
+                   depth,
+                   intrinsics,
+                   w2c,
+                   transform_pts=True,
+                   mask=None,
+                   compute_mean_sq_dist=False,
+                   mean_sq_dist_method="projective"):
     width, height = color.shape[2], color.shape[1]
     CX = intrinsics[0][2]
     CY = intrinsics[1][2]
@@ -259,11 +312,11 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
 
     # Compute indices of pixels
     # 这里是在像素平面生成网格
-    x_grid, y_grid = torch.meshgrid(torch.arange(width, device=device).float(), 
+    x_grid, y_grid = torch.meshgrid(torch.arange(width, device=device).float(),
                                     torch.arange(height, device=device).float(),
                                     indexing='xy')
-    xx = (x_grid - CX)/FX
-    yy = (y_grid - CY)/FY
+    xx = (x_grid - CX) / FX
+    yy = (y_grid - CY) / FY
     xx = xx.reshape(-1)
     yy = yy.reshape(-1)
     depth_z = depth[0].reshape(-1)
@@ -274,7 +327,7 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
         pix_ones = torch.ones(height * width, 1, device=device).float()
         pts4 = torch.cat((pts_cam, pix_ones), dim=1)
         c2w = torch.inverse(w2c)
-        pts = (c2w @ pts4.T).T[:, :3] # pts 是世界坐标系下的3D点
+        pts = (c2w @ pts4.T).T[:, :3]  # pts 是世界坐标系下的3D点
     else:
         pts = pts_cam
 
@@ -282,13 +335,15 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
     if compute_mean_sq_dist:
         if mean_sq_dist_method == "projective":
             # Projective Geometry (this is fast, farther -> larger radius)
-            scale_gaussian = depth_z / ((FX + FY)/2)
+            scale_gaussian = depth_z / ((FX + FY) / 2)
             mean3_sq_dist = scale_gaussian**2
         else:
-            raise ValueError(f"Unknown mean_sq_dist_method {mean_sq_dist_method}")
-    
+            raise ValueError(
+                f"Unknown mean_sq_dist_method {mean_sq_dist_method}")
+
     # Colorize point cloud
-    cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
+    cols = torch.permute(color, (1, 2, 0)).reshape(
+        -1, 3)  # (C, H, W) -> (H, W, C) -> (H * W, C)
     # 给点云上色，后3列为rgb值
     point_cld = torch.cat((pts, cols), -1)
 
@@ -304,20 +359,27 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
     else:
         return point_cld
 
+
 # 初始化第一帧，得到params和variables
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution):
+def initialize_params(init_pt_cld, num_frames, mean3_sq_dist,
+                      gaussian_distribution):
     num_pts = init_pt_cld.shape[0]
-    means3D = init_pt_cld[:, :3] # [num_gaussians, 3]
+    means3D = init_pt_cld[:, :3]  # [num_gaussians, 3]
     # 原始3D高斯是R S S^T R^T，现在改成 r，那么 R = 单位值，S = log(sqrt(r ** 2))
-    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 4]
-    # logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float, device=device)
-    logit_opacities = torch.ones((num_pts, 1), dtype=torch.float, device=device) * 2.1
+    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
+    # logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float,
+    # device=device)
+    logit_opacities = torch.ones(
+        (num_pts, 1), dtype=torch.float, device=device) * 2.1
     if gaussian_distribution == "isotropic":
-        log_scales = torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
+        log_scales = torch.tile(
+            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
     elif gaussian_distribution == "anisotropic":
-        log_scales = torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
+        log_scales = torch.tile(
+            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
     else:
-        raise ValueError(f"Unknown gaussian_distribution {gaussian_distribution}")
+        raise ValueError(
+            f"Unknown gaussian_distribution {gaussian_distribution}")
     params = {
         'means3D': means3D,
         'rgb_colors': init_pt_cld[:, 3:6],
@@ -326,7 +388,8 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
         'log_scales': log_scales,
     }
 
-    # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
+    # Initialize a single gaussian trajectory to model the camera poses relative
+    # to the first frame
     # 将第一帧的相机位姿设置为单位值
     cam_rots = np.tile([1, 0, 0, 0], (1, 1))
     cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
@@ -337,29 +400,45 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
     for k, v in params.items():
         # Check if value is already a torch tensor
         if not isinstance(v, torch.Tensor):
-            params[k] = torch.nn.Parameter(torch.tensor(v, device=device).float().contiguous().requires_grad_(True))
+            params[k] = torch.nn.Parameter(
+                torch.tensor(
+                    v, device=device).float().contiguous().requires_grad_(True))
         else:
-            params[k] = torch.nn.Parameter(v.float().contiguous().requires_grad_(True)).to(device)
+            params[k] = torch.nn.Parameter(
+                v.float().contiguous().requires_grad_(True)).to(device)
 
-    variables = {'max_2D_radius': torch.zeros(params['means3D'].shape[0], device=device).float(),
-                 'means2D_gradient_accum': torch.zeros(params['means3D'].shape[0], device=device).float(),
-                 'denom': torch.zeros(params['means3D'].shape[0], device=device).float(),
-                 'timestep': torch.zeros(params['means3D'].shape[0], device=device).float()}
+    variables = {
+        'max_2D_radius':
+            torch.zeros(params['means3D'].shape[0], device=device).float(),
+        'means2D_gradient_accum':
+            torch.zeros(params['means3D'].shape[0], device=device).float(),
+        'denom':
+            torch.zeros(params['means3D'].shape[0], device=device).float(),
+        'timestep':
+            torch.zeros(params['means3D'].shape[0], device=device).float()
+    }
 
     return params, variables
 
 
 def initialize_optimizer(params, lrs_dict, tracking):
     lrs = lrs_dict
-    param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
+    param_groups = [{
+        'params': [v],
+        'name': k,
+        'lr': lrs[k]
+    } for k, v in params.items()]
     if tracking:
         return torch.optim.Adam(param_groups)
     else:
         return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
 
 
-def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, 
-                              mean_sq_dist_method, densify_dataset=None, 
+def initialize_first_timestep(dataset,
+                              num_frames,
+                              scene_radius_depth_ratio,
+                              mean_sq_dist_method,
+                              densify_dataset=None,
                               gaussian_distribution=None,
                               quadtree_contrast_threshold=None,
                               scene_name=None):
@@ -368,104 +447,136 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
     color, depth, intrinsics, pose = dataset[0]
 
     # Process RGB-D Data
-    color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-    depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
-    
+    color = color.permute(2, 0, 1) / 255  # (H, W, C) -> (C, H, W)
+    depth = depth.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
+
     # Process Camera Parameters
     intrinsics = intrinsics[:3, :3]
     w2c = torch.linalg.inv(pose)
 
     # Setup Camera: cam 是一个 diff_gaussian_rasterization 中的 Camera 类，里面存放了相机参数信息
-    cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), w2c.detach().cpu().numpy(), color.device)
+    cam = setup_camera(color.shape[2], color.shape[1],
+                       intrinsics.cpu().numpy(),
+                       w2c.detach().cpu().numpy(), color.device)
 
     if densify_dataset is not None:
         # Get Densification RGB-D Data & Camera Parameters
         color, depth, densify_intrinsics, _ = densify_dataset[0]
-        color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-        depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
+        color = color.permute(2, 0, 1) / 255  # (H, W, C) -> (C, H, W)
+        depth = depth.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
         densify_intrinsics = densify_intrinsics[:3, :3]
-        densify_cam = setup_camera(color.shape[2], color.shape[1], densify_intrinsics.cpu().numpy(), w2c.detach().cpu().numpy())
+        densify_cam = setup_camera(color.shape[2], color.shape[1],
+                                   densify_intrinsics.cpu().numpy(),
+                                   w2c.detach().cpu().numpy())
     else:
         densify_intrinsics = intrinsics
 
     # Get Initial Point Cloud (PyTorch CUDA Tensor)
     # 这里能不能用一些预测 depth 的模型把空洞的 depth 补齐呢？
-    mask = (depth[0, :, :] > 0) # Mask out invalid depth values
+    mask = (depth[0, :, :] > 0)  # Mask out invalid depth values
     # mask = mask.reshape(-1)
     # mean3_sq_dist 是一个数组，每个3D点对应其中的一个值，也就是文章里的r ** 2
-    init_pt_cld, mean3_sq_dist = get_quadtree_pointcloud(color, depth, densify_intrinsics, w2c, 
-                                                mask=mask, compute_mean_sq_dist=True, 
-                                                mean_sq_dist_method=mean_sq_dist_method,
-                                                quadtree_contrast_threshold=quadtree_contrast_threshold,
-                                                time_idx=0,
-                                                scene_name=scene_name)
+    init_pt_cld, mean3_sq_dist = get_quadtree_pointcloud(
+        color,
+        depth,
+        densify_intrinsics,
+        w2c,
+        mask=mask,
+        compute_mean_sq_dist=True,
+        mean_sq_dist_method=mean_sq_dist_method,
+        quadtree_contrast_threshold=quadtree_contrast_threshold,
+        time_idx=0,
+        scene_name=scene_name)
 
     # Initialize Parameters
-    params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution)
+    params, variables = initialize_params(init_pt_cld, num_frames,
+                                          mean3_sq_dist, gaussian_distribution)
 
-    # Initialize an estimate of scene radius for Gaussian-Splatting Densification
+    # Initialize an estimate of scene radius for Gaussian-Splatting
+    # Densification
     # replica 里的 scene_radius_depth_ratio = 3
-    variables['scene_radius'] = torch.max(depth)/scene_radius_depth_ratio
+    variables['scene_radius'] = torch.max(depth) / scene_radius_depth_ratio
 
     if densify_dataset is not None:
-        return params, variables, intrinsics, w2c, cam, densify_intrinsics, densify_cam
+        return (params, variables, intrinsics, w2c, cam, densify_intrinsics,
+                densify_cam)
     else:
         return params, variables, intrinsics, w2c, cam
 
 
-def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_for_loss,
-             sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
+def get_loss(params,
+             curr_data,
+             variables,
+             iter_time_idx,
+             loss_weights,
+             use_sil_for_loss,
+             sil_thres,
+             use_l1,
+             ignore_outlier_depth_loss,
+             tracking=False,
+             mapping=False,
+             do_ba=False,
+             plot_dir=None,
+             visualize_tracking_loss=False,
+             tracking_iteration=None):
     # Initialize Loss Dictionary
     losses = {}
 
     if tracking:
         # Get current frame Gaussians, where only the camera pose gets gradient
-        transformed_gaussians = transform_to_frame(params, iter_time_idx, 
-                                             gaussians_grad=False,
-                                             camera_grad=True)
+        transformed_gaussians = transform_to_frame(params,
+                                                   iter_time_idx,
+                                                   gaussians_grad=False,
+                                                   camera_grad=True)
     elif mapping:
         if do_ba:
-            # Get current frame Gaussians, where both camera pose and Gaussians get gradient
-            transformed_gaussians = transform_to_frame(params, iter_time_idx,
-                                                 gaussians_grad=True,
-                                                 camera_grad=True)
+            # Get current frame Gaussians, where both camera pose and Gaussians
+            # get gradient
+            transformed_gaussians = transform_to_frame(params,
+                                                       iter_time_idx,
+                                                       gaussians_grad=True,
+                                                       camera_grad=True)
         else:
             # Get current frame Gaussians, where only the Gaussians get gradient
-            transformed_gaussians = transform_to_frame(params, iter_time_idx,
-                                                 gaussians_grad=True,
-                                                 camera_grad=False)
+            transformed_gaussians = transform_to_frame(params,
+                                                       iter_time_idx,
+                                                       gaussians_grad=True,
+                                                       camera_grad=False)
     else:
         # Get current frame Gaussians, where only the Gaussians get gradient
-        transformed_gaussians = transform_to_frame(params, iter_time_idx,
-                                             gaussians_grad=True,
-                                             camera_grad=False)
+        transformed_gaussians = transform_to_frame(params,
+                                                   iter_time_idx,
+                                                   gaussians_grad=True,
+                                                   camera_grad=False)
 
     # transformed_gaussians 是相机坐标系下的3D高斯坐标
     # Initialize Render Variables
     rendervar = transformed_params2rendervar(params, transformed_gaussians)
-    depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_gaussians)
+    depth_sil_rendervar = transformed_params2depthplussilhouette(
+        params, curr_data['w2c'], transformed_gaussians)
 
     # RGB Rendering
     rendervar['means2D'].retain_grad()
     im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
-    variables['means2D'] = rendervar['means2D']  # Gradient only accum from colour render for densification
+    variables['means2D'] = rendervar[
+        'means2D']  # Gradient only accum from colour render for densification
 
     # Depth & Silhouette Rendering
-    depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
-    depth = depth_sil[0, :, :].unsqueeze(0) # depth 是渲染的深度
+    depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(
+        **depth_sil_rendervar)
+    depth = depth_sil[0, :, :].unsqueeze(0)  # depth 是渲染的深度
     silhouette = depth_sil[1, :, :]
-    presence_sil_mask = (silhouette > sil_thres) # > 0.99 的部分
+    presence_sil_mask = (silhouette > sil_thres)  # > 0.99 的部分
     depth_sq = depth_sil[2, :, :].unsqueeze(0)
     uncertainty = depth_sq - depth**2
     uncertainty = uncertainty.detach()
 
     # Mask with valid depth values (accounts for outlier depth values)
     nan_mask = (~torch.isnan(depth)) & (~torch.isnan(uncertainty))
-    if ignore_outlier_depth_loss: # 剔除掉与真值深度差得过多的像素点
-        depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
-        mask = (depth_error < 10*depth_error.median())
+    if ignore_outlier_depth_loss:  # 剔除掉与真值深度差得过多的像素点
+        depth_error = torch.abs(curr_data['depth'] -
+                                depth) * (curr_data['depth'] > 0)
+        mask = (depth_error < 10 * depth_error.median())
         mask = mask & (curr_data['depth'] > 0)
     else:
         mask = (curr_data['depth'] > 0)
@@ -481,7 +592,7 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].sum()
         else:
             losses['depth'] = torch.abs(curr_data['depth'] - depth)[mask].mean()
-    
+
     # RGB Loss
     if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
         color_mask = torch.tile(mask, (3, 1, 1))
@@ -489,8 +600,9 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         losses['im'] = torch.abs(curr_data['im'] - im)[color_mask].sum()
     elif tracking:
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
-    else: # mapping 的话还考虑了 SSIM 损失
-        losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
+    else:  # mapping 的话还考虑了 SSIM 损失
+        losses['im'] = 0.8 * l1_loss_v1(
+            im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
 
     # Visualize the Diff Images
     if tracking and visualize_tracking_loss:
@@ -499,17 +611,26 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         weighted_im = curr_data['im'] * color_mask
         weighted_render_depth = depth * mask
         weighted_depth = curr_data['depth'] * mask
-        diff_rgb = torch.abs(weighted_render_im - weighted_im).mean(dim=0).detach().cpu()
-        diff_depth = torch.abs(weighted_render_depth - weighted_depth).mean(dim=0).detach().cpu()
+        diff_rgb = torch.abs(weighted_render_im -
+                             weighted_im).mean(dim=0).detach().cpu()
+        diff_depth = torch.abs(weighted_render_depth -
+                               weighted_depth).mean(dim=0).detach().cpu()
         viz_img = torch.clip(weighted_im.permute(1, 2, 0).detach().cpu(), 0, 1)
         ax[0, 0].imshow(viz_img)
         ax[0, 0].set_title("Weighted GT RGB")
-        viz_render_img = torch.clip(weighted_render_im.permute(1, 2, 0).detach().cpu(), 0, 1)
+        viz_render_img = torch.clip(
+            weighted_render_im.permute(1, 2, 0).detach().cpu(), 0, 1)
         ax[1, 0].imshow(viz_render_img)
         ax[1, 0].set_title("Weighted Rendered RGB")
-        ax[0, 1].imshow(weighted_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6)
+        ax[0, 1].imshow(weighted_depth[0].detach().cpu(),
+                        cmap="jet",
+                        vmin=0,
+                        vmax=6)
         ax[0, 1].set_title("Weighted GT Depth")
-        ax[1, 1].imshow(weighted_render_depth[0].detach().cpu(), cmap="jet", vmin=0, vmax=6)
+        ax[1, 1].imshow(weighted_render_depth[0].detach().cpu(),
+                        cmap="jet",
+                        vmin=0,
+                        vmax=6)
         ax[1, 1].set_title("Weighted Rendered Depth")
         ax[0, 2].imshow(diff_rgb, cmap="jet", vmin=0, vmax=0.8)
         ax[0, 2].set_title(f"Diff RGB, Loss: {torch.round(losses['im'])}")
@@ -533,21 +654,28 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
         plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
         cv2.imshow('Diff Images', plot_img)
         cv2.waitKey(1)
-        ## Save Tracking Loss Viz
-        # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" % iter_time_idx)
+        # Save Tracking Loss Viz
+        # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" %
+        # iter_time_idx)
         # os.makedirs(save_plot_dir, exist_ok=True)
-        # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" % tracking_iteration), bbox_inches='tight')
+        # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" %
+        # tracking_iteration), bbox_inches='tight')
         # plt.close()
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
-    # torchvision.utils.save_image(im, 'fx/quad/rendered_im/rendered_im_%.4f.png'%loss)
-    # torchvision.utils.save_image((silhouette>0.5).float(), 'fx/quad/sil<0.5/sil_%.4f.png'%loss)
-    # torchvision.utils.save_image((torch.abs(curr_data['depth'] - depth) < 0.1).float(), 'fx/quad/depth_error/depth_error_%.4f.png'%loss)
-    # torchvision.utils.save_image((torch.abs(curr_data['im'] - im).mean(dim=0) < 0.1).float(), 'fx/quad/RGB_error/rendered_error_%.4f.png'%loss)
+    # torchvision.utils.save_image(im,
+    # 'fx/quad/rendered_im/rendered_im_%.4f.png'%loss)
+    # torchvision.utils.save_image((silhouette>0.5).float(),
+    # 'fx/quad/sil<0.5/sil_%.4f.png'%loss)
+    # torchvision.utils.save_image((torch.abs(curr_data['depth'] - depth) <
+    # 0.1).float(), 'fx/quad/depth_error/depth_error_%.4f.png'%loss)
+    # torchvision.utils.save_image((torch.abs(curr_data['im'] - im).mean(dim=0)
+    # < 0.1).float(), 'fx/quad/RGB_error/rendered_error_%.4f.png'%loss)
 
-    seen = radius > 0 # 这里的 radius 是在渲染RGB时算出来的
-    variables['max_2D_radius'][seen] = torch.max(radius[seen], variables['max_2D_radius'][seen])
+    seen = radius > 0  # 这里的 radius 是在渲染RGB时算出来的
+    variables['max_2D_radius'][seen] = torch.max(
+        radius[seen], variables['max_2D_radius'][seen])
     variables['seen'] = seen
     weighted_losses['loss'] = loss
 
@@ -556,15 +684,19 @@ def get_loss(params, curr_data, variables, iter_time_idx, loss_weights, use_sil_
 
 def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
     num_pts = new_pt_cld.shape[0]
-    means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
-    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 4]
-    logit_opacities = torch.ones((num_pts, 1), dtype=torch.float, device=device) * 2.1
+    means3D = new_pt_cld[:, :3]  # [num_gaussians, 3]
+    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
+    logit_opacities = torch.ones(
+        (num_pts, 1), dtype=torch.float, device=device) * 2.1
     if gaussian_distribution == "isotropic":
-        log_scales = torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
+        log_scales = torch.tile(
+            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
     elif gaussian_distribution == "anisotropic":
-        log_scales = torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
+        log_scales = torch.tile(
+            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
     else:
-        raise ValueError(f"Unknown gaussian_distribution {gaussian_distribution}")
+        raise ValueError(
+            f"Unknown gaussian_distribution {gaussian_distribution}")
     params = {
         'means3D': means3D,
         'rgb_colors': new_pt_cld[:, 3:6],
@@ -575,23 +707,31 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
     for k, v in params.items():
         # Check if value is already a torch tensor
         if not isinstance(v, torch.Tensor):
-            params[k] = torch.nn.Parameter(torch.tensor(v, device=device).float().contiguous().requires_grad_(True))
+            params[k] = torch.nn.Parameter(
+                torch.tensor(
+                    v, device=device).float().contiguous().requires_grad_(True))
         else:
-            params[k] = torch.nn.Parameter(v.float().contiguous().requires_grad_(True)).to(device)
+            params[k] = torch.nn.Parameter(
+                v.float().contiguous().requires_grad_(True)).to(device)
     # 此函数和initialize_params函数的区别是：该函数只初始化新的点云的信息，不生成相机位姿信息和variables信息
     return params
+
 
 def initialize_finer_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
     num_pts = new_pt_cld.shape[0]
-    means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
-    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 4]
-    logit_opacities = torch.ones((num_pts, 1), dtype=torch.float, device=device) * 0
+    means3D = new_pt_cld[:, :3]  # [num_gaussians, 3]
+    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
+    logit_opacities = torch.ones(
+        (num_pts, 1), dtype=torch.float, device=device) * 0
     if gaussian_distribution == "isotropic":
-        log_scales = torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
+        log_scales = torch.tile(
+            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
     elif gaussian_distribution == "anisotropic":
-        log_scales = torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
+        log_scales = torch.tile(
+            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
     else:
-        raise ValueError(f"Unknown gaussian_distribution {gaussian_distribution}")
+        raise ValueError(
+            f"Unknown gaussian_distribution {gaussian_distribution}")
     params = {
         'means3D': means3D,
         'rgb_colors': new_pt_cld[:, 3:6],
@@ -602,128 +742,181 @@ def initialize_finer_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
     for k, v in params.items():
         # Check if value is already a torch tensor
         if not isinstance(v, torch.Tensor):
-            params[k] = torch.nn.Parameter(torch.tensor(v, device=device).float().contiguous().requires_grad_(True))
+            params[k] = torch.nn.Parameter(
+                torch.tensor(
+                    v, device=device).float().contiguous().requires_grad_(True))
         else:
-            params[k] = torch.nn.Parameter(v.float().contiguous().requires_grad_(True)).to(device)
+            params[k] = torch.nn.Parameter(
+                v.float().contiguous().requires_grad_(True)).to(device)
     # 此函数和initialize_params函数的区别是：该函数只初始化新的点云的信息，不生成相机位姿信息和variables信息
     return params
 
 
-def add_new_gaussians(params, variables, curr_data, sil_thres, 
-                      time_idx, mean_sq_dist_method, gaussian_distribution, 
+def add_new_gaussians(params, variables, curr_data, sil_thres, time_idx,
+                      mean_sq_dist_method, gaussian_distribution,
                       quadtree_contrast_threshold, scene_name):
     # Silhouette Rendering
-    transformed_gaussians = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
+    transformed_gaussians = transform_to_frame(params,
+                                               time_idx,
+                                               gaussians_grad=False,
+                                               camera_grad=False)
     # rendervar = transformed_params2rendervar(params, transformed_gaussians)
-    depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_gaussians)
-    depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+    depth_sil_rendervar = transformed_params2depthplussilhouette(
+        params, curr_data['w2c'], transformed_gaussians)
+    depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(
+        **depth_sil_rendervar)
     # im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     silhouette = depth_sil[1, :, :]
-    non_presence_sil_mask = (silhouette < sil_thres) # < 0.5
+    non_presence_sil_mask = (silhouette < sil_thres)  # < 0.5
     # Check for new foreground objects by using GT depth
     # gt_depth = curr_data['depth'][0, :, :]
     # render_depth = depth_sil[0, :, :]
     # depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
-    # non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 50*depth_error.median())
+    # non_presence_depth_mask = (render_depth > gt_depth) * (depth_error >
+    # 50*depth_error.median())
     # Determine non-presence mask
-    # non_presence_mask = non_presence_sil_mask | non_presence_depth_mask # silhouette低、深度不合理的像素的并集的mask
-    non_presence_mask = non_presence_sil_mask # 1125改，coarse densification 只填补没观察到的区域，深度差异大的地方在fine densification填补
-    # torchvision.utils.save_image((non_presence_depth_mask).detach().float(), 'fx/CoarserDepthMask_%04d_%d.png'%(time_idx, torch.sum(non_presence_depth_mask)))
-    # torchvision.utils.save_image((non_presence_sil_mask).detach().float(), 'fx/CoarserSilMask_%04d_%d.png'%(time_idx, torch.sum(non_presence_sil_mask)))
-    # torchvision.utils.save_image(im.detach(), 'fx/temp_image/RenderedImage_%04d.png'%time_idx)
+    # non_presence_mask = non_presence_sil_mask | non_presence_depth_mask #
+    # silhouette低、深度不合理的像素的并集的mask
+    # 1125改，coarse densification 只填补没观察到的区域，深度差异大的地方在fine densification填补
+    non_presence_mask = non_presence_sil_mask
+    # torchvision.utils.save_image((non_presence_depth_mask).detach().float(),
+    # 'fx/CoarserDepthMask_%04d_%d.png'%(time_idx,
+    # torch.sum(non_presence_depth_mask)))
+    # torchvision.utils.save_image((non_presence_sil_mask).detach().float(),
+    # 'fx/CoarserSilMask_%04d_%d.png'%(time_idx,
+    # torch.sum(non_presence_sil_mask)))
+    # torchvision.utils.save_image(im.detach(),
+    # 'fx/temp_image/RenderedImage_%04d.png'%time_idx)
     # # Flatten mask
     # non_presence_mask = non_presence_mask.reshape(-1)
-
 
     # Get the new frame Gaussians based on the Silhouette
     # 如果mask是全0，那就不用添加新高斯了
     if torch.sum(non_presence_mask) > 0:
         # Get the new pointcloud in the world frame
-        curr_cam_rot = torch.nn.functional.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
+        curr_cam_rot = torch.nn.functional.normalize(
+            params['cam_unnorm_rots'][..., time_idx].detach())
         curr_cam_tran = params['cam_trans'][..., time_idx].detach()
         curr_w2c = torch.eye(4, device=device).float()
         curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
         curr_w2c[:3, 3] = curr_cam_tran
         valid_depth_mask = (curr_data['depth'][0, :, :] > 0)
         # non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
-        non_presence_mask = non_presence_mask & valid_depth_mask # 输入没有展平的mask
-        
-        new_pt_cld, mean3_sq_dist = get_quadtree_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
-                                                            curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
-                                                            mean_sq_dist_method=mean_sq_dist_method,
-                                                            quadtree_contrast_threshold=quadtree_contrast_threshold,
-                                                            time_idx=time_idx,
-                                                            scene_name=scene_name)
+        non_presence_mask = non_presence_mask & valid_depth_mask  # 输入没有展平的mask
+
+        new_pt_cld, mean3_sq_dist = get_quadtree_pointcloud(
+            curr_data['im'],
+            curr_data['depth'],
+            curr_data['intrinsics'],
+            curr_w2c,
+            mask=non_presence_mask,
+            compute_mean_sq_dist=True,
+            mean_sq_dist_method=mean_sq_dist_method,
+            quadtree_contrast_threshold=quadtree_contrast_threshold,
+            time_idx=time_idx,
+            scene_name=scene_name)
         # print("new quadtree points: ", new_pt_cld.shape[0], "\n")
         if new_pt_cld.shape[0] != 0:
-            new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution)
+            new_params = initialize_new_params(new_pt_cld, mean3_sq_dist,
+                                               gaussian_distribution)
             for k, v in new_params.items():
                 # 将新生成的高斯点拼接到已有的高斯点集合里，params[k]是原来的，v是新的，通过cat拼接到一起
-                params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
+                params[k] = torch.nn.Parameter(
+                    torch.cat((params[k], v), dim=0).requires_grad_(True))
             num_pts = params['means3D'].shape[0]
-            variables['means2D_gradient_accum'] = torch.zeros(num_pts, device=device).float()
+            variables['means2D_gradient_accum'] = torch.zeros(
+                num_pts, device=device).float()
             variables['denom'] = torch.zeros(num_pts, device=device).float()
-            variables['max_2D_radius'] = torch.zeros(num_pts, device=device).float()
-            new_timestep = time_idx*torch.ones(new_pt_cld.shape[0],device=device).float()
-            variables['timestep'] = torch.cat((variables['timestep'],new_timestep),dim=0)
+            variables['max_2D_radius'] = torch.zeros(num_pts,
+                                                     device=device).float()
+            new_timestep = time_idx * torch.ones(new_pt_cld.shape[0],
+                                                 device=device).float()
+            variables['timestep'] = torch.cat(
+                (variables['timestep'], new_timestep), dim=0)
 
     return params, variables
 
 
 def add_finer_gaussians(params, variables, curr_data, sil_thres, color_thres,
-                      time_idx, mean_sq_dist_method, gaussian_distribution):
+                        time_idx, mean_sq_dist_method, gaussian_distribution):
     # Silhouette Rendering
-    transformed_gaussians = transform_to_frame(params, time_idx, gaussians_grad=False, camera_grad=False)
+    transformed_gaussians = transform_to_frame(params,
+                                               time_idx,
+                                               gaussians_grad=False,
+                                               camera_grad=False)
     rendervar = transformed_params2rendervar(params, transformed_gaussians)
-    depth_sil_rendervar = transformed_params2depthplussilhouette(params, curr_data['w2c'],
-                                                                 transformed_gaussians)
-    depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(**depth_sil_rendervar)
+    depth_sil_rendervar = transformed_params2depthplussilhouette(
+        params, curr_data['w2c'], transformed_gaussians)
+    depth_sil, _, _, = Renderer(raster_settings=curr_data['cam'])(
+        **depth_sil_rendervar)
     im, radius, _, = Renderer(raster_settings=curr_data['cam'])(**rendervar)
     silhouette = depth_sil[1, :, :]
-    non_presence_sil_mask = (silhouette < sil_thres) # sil_thres = 0.5
+    non_presence_sil_mask = (silhouette < sil_thres)  # sil_thres = 0.5
     # Check for new foreground objects by using GT depth
     gt_depth = curr_data['depth'][0, :, :]
     render_depth = depth_sil[0, :, :]
     depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
-    im_error = torch.mean(torch.abs(curr_data['im'] - im), dim=0) * (gt_depth > 0)
-    # non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 50*depth_error.median())
-    # non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > depth_thres)
+    im_error = torch.mean(torch.abs(curr_data['im'] - im),
+                          dim=0) * (gt_depth > 0)
+    # non_presence_depth_mask = (render_depth > gt_depth) * (depth_error >
+    # 50*depth_error.median())
+    # non_presence_depth_mask = (render_depth > gt_depth) * (depth_error >
+    # depth_thres)
     # non_presence_depth_mask = (depth_error > depth_thres)
-    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 50*depth_error.median())
+    non_presence_depth_mask = (render_depth > gt_depth) * (
+        depth_error > 50 * depth_error.median())
     non_presence_color_mask = (im_error > color_thres)
     # Determine non-presence mask
-    non_presence_mask = non_presence_color_mask | non_presence_depth_mask | non_presence_sil_mask
+    non_presence_mask = (non_presence_color_mask | non_presence_depth_mask |
+                         non_presence_sil_mask)
     # non_presence_mask = non_presence_depth_mask | non_presence_sil_mask
-    # torchvision.utils.save_image((non_presence_depth_mask).detach().float(), 'fx/FinerDepthMask_%04d_%d.png'%(time_idx, torch.sum(non_presence_depth_mask)))
-    # torchvision.utils.save_image((non_presence_sil_mask).detach().float(), 'fx/FinerSilMask_%04d_%d.png'%(time_idx, torch.sum(non_presence_sil_mask)))
-    # torchvision.utils.save_image(im.detach(), 'fx/temp_image/RenderedImage_%04d.png'%(time_idx))
-    # torchvision.utils.save_image((non_presence_color_mask).detach().float(), 'fx/FinerColorMask_%04d_%d.png'%(time_idx, torch.sum(non_presence_color_mask)))
+    # torchvision.utils.save_image((non_presence_depth_mask).detach().float(),
+    # 'fx/FinerDepthMask_%04d_%d.png'%(time_idx,
+    # torch.sum(non_presence_depth_mask)))
+    # torchvision.utils.save_image((non_presence_sil_mask).detach().float(),
+    # 'fx/FinerSilMask_%04d_%d.png'%(time_idx,
+    # torch.sum(non_presence_sil_mask)))
+    # torchvision.utils.save_image(im.detach(),
+    # 'fx/temp_image/RenderedImage_%04d.png'%(time_idx))
+    # torchvision.utils.save_image((non_presence_color_mask).detach().float(),
+    # 'fx/FinerColorMask_%04d_%d.png'%(time_idx,
+    # torch.sum(non_presence_color_mask)))
     # Flatten mask
     non_presence_mask = non_presence_mask.reshape(-1)
 
     # Get the new frame Gaussians based on the Silhouette
     if torch.sum(non_presence_mask) > 0:
         # Get the new pointcloud in the world frame
-        curr_cam_rot = torch.nn.functional.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
+        curr_cam_rot = torch.nn.functional.normalize(
+            params['cam_unnorm_rots'][..., time_idx].detach())
         curr_cam_tran = params['cam_trans'][..., time_idx].detach()
         curr_w2c = torch.eye(4).cuda(device).float()
         curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
         curr_w2c[:3, 3] = curr_cam_tran
         valid_depth_mask = (curr_data['depth'][0, :, :] > 0)
         non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
-        new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
-                                    curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
-                                    mean_sq_dist_method=mean_sq_dist_method)
-        new_params = initialize_finer_params(new_pt_cld, mean3_sq_dist, gaussian_distribution)
+        new_pt_cld, mean3_sq_dist = get_pointcloud(
+            curr_data['im'],
+            curr_data['depth'],
+            curr_data['intrinsics'],
+            curr_w2c,
+            mask=non_presence_mask,
+            compute_mean_sq_dist=True,
+            mean_sq_dist_method=mean_sq_dist_method)
+        new_params = initialize_finer_params(new_pt_cld, mean3_sq_dist,
+                                             gaussian_distribution)
         for k, v in new_params.items():
-            params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
+            params[k] = torch.nn.Parameter(
+                torch.cat((params[k], v), dim=0).requires_grad_(True))
         num_pts = params['means3D'].shape[0]
-        variables['means2D_gradient_accum'] = torch.zeros(num_pts, device=device).float()
+        variables['means2D_gradient_accum'] = torch.zeros(
+            num_pts, device=device).float()
         variables['denom'] = torch.zeros(num_pts, device=device).float()
         variables['max_2D_radius'] = torch.zeros(num_pts, device=device).float()
-        new_timestep = time_idx*torch.ones(new_pt_cld.shape[0],device=device).float()
-        variables['timestep'] = torch.cat((variables['timestep'],new_timestep),dim=0)
+        new_timestep = time_idx * torch.ones(new_pt_cld.shape[0],
+                                             device=device).float()
+        variables['timestep'] = torch.cat((variables['timestep'], new_timestep),
+                                          dim=0)
 
     return params, variables
 
@@ -731,22 +924,29 @@ def add_finer_gaussians(params, variables, curr_data, sil_thres, color_thres,
 def initialize_camera_pose(params, curr_time_idx, forward_prop):
     with torch.no_grad():
         if curr_time_idx > 1 and forward_prop:
-            # Initialize the camera pose for the current frame based on a constant velocity model
+            # Initialize the camera pose for the current frame based on a
+            # constant velocity model
             # Rotation
-            prev_rot1 = F.normalize(params['cam_unnorm_rots'][..., curr_time_idx-1].detach())
-            prev_rot2 = F.normalize(params['cam_unnorm_rots'][..., curr_time_idx-2].detach())
+            prev_rot1 = F.normalize(
+                params['cam_unnorm_rots'][..., curr_time_idx - 1].detach())
+            prev_rot2 = F.normalize(
+                params['cam_unnorm_rots'][..., curr_time_idx - 2].detach())
             new_rot = F.normalize(prev_rot1 + (prev_rot1 - prev_rot2))
             params['cam_unnorm_rots'][..., curr_time_idx] = new_rot.detach()
             # Translation
-            prev_tran1 = params['cam_trans'][..., curr_time_idx-1].detach()
-            prev_tran2 = params['cam_trans'][..., curr_time_idx-2].detach()
+            prev_tran1 = params['cam_trans'][..., curr_time_idx - 1].detach()
+            prev_tran2 = params['cam_trans'][..., curr_time_idx - 2].detach()
             new_tran = prev_tran1 + (prev_tran1 - prev_tran2)
             params['cam_trans'][..., curr_time_idx] = new_tran.detach()
         else:
             # Initialize the camera pose for the current frame
-            params['cam_unnorm_rots'][..., curr_time_idx] = params['cam_unnorm_rots'][..., curr_time_idx-1].detach()
-            params['cam_trans'][..., curr_time_idx] = params['cam_trans'][..., curr_time_idx-1].detach()
-    
+            params['cam_unnorm_rots'][
+                ..., curr_time_idx] = params['cam_unnorm_rots'][...,
+                                                                curr_time_idx -
+                                                                1].detach()
+            params['cam_trans'][..., curr_time_idx] = params['cam_trans'][
+                ..., curr_time_idx - 1].detach()
+
     return params
 
 
@@ -759,12 +959,18 @@ def convert_params_to_store(params):
             params_to_store[k] = v
     return params_to_store
 
+
 def get_dinov2(color, img_h, img_w, num_cls, edge, dim):
-    model = DINO2SEG(img_h=img_h, img_w=img_w, num_cls=num_cls, edge=edge, dim=dim)
+    model = DINO2SEG(img_h=img_h,
+                     img_w=img_w,
+                     num_cls=num_cls,
+                     edge=edge,
+                     dim=dim)
     pretrained_model_path = 'segment_model/model/dinov2_replica.pth'
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    model.load_state_dict(torch.load(pretrained_model_path, map_location=device))
+    model.load_state_dict(torch.load(pretrained_model_path,
+                                     map_location=device))
     semantic_feature = model(color)
     return semantic_feature
 
@@ -789,7 +995,7 @@ def rgbd_slam(config: dict):
     # 创建 eval 文件夹
     eval_dir = os.path.join(output_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
-    
+
     # Init WandB
     if config['use_wandb']:
         wandb_time_step = 0
@@ -812,8 +1018,9 @@ def rgbd_slam(config: dict):
     if "gradslam_data_cfg" not in dataset_config:
         gradslam_data_cfg = {}
         gradslam_data_cfg["dataset_name"] = dataset_config["dataset_name"]
-    else: # return 一个 dict
-        gradslam_data_cfg = load_dataset_config(dataset_config["gradslam_data_cfg"])
+    else:  # return 一个 dict
+        gradslam_data_cfg = load_dataset_config(
+            dataset_config["gradslam_data_cfg"])
     # replica 配置文件里没有 ignore_bad，这里默认为 False
     if "ignore_bad" not in dataset_config:
         dataset_config["ignore_bad"] = False
@@ -822,22 +1029,30 @@ def rgbd_slam(config: dict):
         dataset_config["use_train_split"] = True
     # densification 和 tracking 过程的图像尺寸都是和原图一样的
     if "densification_image_height" not in dataset_config:
-        dataset_config["densification_image_height"] = dataset_config["desired_image_height"]
-        dataset_config["densification_image_width"] = dataset_config["desired_image_width"]
+        dataset_config["densification_image_height"] = dataset_config[
+            "desired_image_height"]
+        dataset_config["densification_image_width"] = dataset_config[
+            "desired_image_width"]
         seperate_densification_res = False
     else:
-        if dataset_config["densification_image_height"] != dataset_config["desired_image_height"] or \
-            dataset_config["densification_image_width"] != dataset_config["desired_image_width"]:
+        if (dataset_config["densification_image_height"] !=
+                dataset_config["desired_image_height"] or
+                dataset_config["densification_image_width"] !=
+                dataset_config["desired_image_width"]):
             seperate_densification_res = True
         else:
             seperate_densification_res = False
     if "tracking_image_height" not in dataset_config:
-        dataset_config["tracking_image_height"] = dataset_config["desired_image_height"]
-        dataset_config["tracking_image_width"] = dataset_config["desired_image_width"]
+        dataset_config["tracking_image_height"] = dataset_config[
+            "desired_image_height"]
+        dataset_config["tracking_image_width"] = dataset_config[
+            "desired_image_width"]
         seperate_tracking_res = False
     else:
-        if dataset_config["tracking_image_height"] != dataset_config["desired_image_height"] or \
-            dataset_config["tracking_image_width"] != dataset_config["desired_image_width"]:
+        if (dataset_config["tracking_image_height"] !=
+                dataset_config["desired_image_height"] or
+                dataset_config["tracking_image_width"] !=
+                dataset_config["desired_image_width"]):
             seperate_tracking_res = True
         else:
             seperate_tracking_res = False
@@ -845,20 +1060,20 @@ def rgbd_slam(config: dict):
     # Poses are relative to the first frame
     dataset = get_dataset(
         config_dict=gradslam_data_cfg,
-        basedir=dataset_config["basedir"], # ./data/Replica
-        sequence=os.path.basename(dataset_config["sequence"]), # scene_name
-        start=dataset_config["start"], # 0
-        end=dataset_config["end"], # -1
-        stride=dataset_config["stride"], # 1
+        basedir=dataset_config["basedir"],  # ./data/Replica
+        sequence=os.path.basename(dataset_config["sequence"]),  # scene_name
+        start=dataset_config["start"],  # 0
+        end=dataset_config["end"],  # -1
+        stride=dataset_config["stride"],  # 1
         desired_height=dataset_config["desired_image_height"],
         desired_width=dataset_config["desired_image_width"],
         device=device,
         relative_pose=True,
-        ignore_bad=dataset_config["ignore_bad"], # 默认 False
-        use_train_split=dataset_config["use_train_split"], # 默认 True
+        ignore_bad=dataset_config["ignore_bad"],  # 默认 False
+        use_train_split=dataset_config["use_train_split"],  # 默认 True
     )
     # 获取数据集数目
-    num_frames = dataset_config["num_frames"] # -1
+    num_frames = dataset_config["num_frames"]  # -1
     if num_frames == -1:
         num_frames = len(dataset)
 
@@ -881,21 +1096,28 @@ def rgbd_slam(config: dict):
         )
         # Initialize Parameters, Canonical & Densification Camera parameters
         params, variables, intrinsics, first_frame_w2c, cam, \
-            densify_intrinsics, densify_cam = initialize_first_timestep(dataset, num_frames,
-                                                                        config['scene_radius_depth_ratio'],
-                                                                        config['mean_sq_dist_method'],
-                                                                        densify_dataset=densify_dataset,
-                                                                        gaussian_distribution=config['gaussian_distribution'],
-                                                                        quadtree_contrast_threshold=config['quadtree_contrast_threshold'])                                                                                                                  
+            densify_intrinsics, densify_cam = initialize_first_timestep(
+                dataset,
+                num_frames,
+                config['scene_radius_depth_ratio'],
+                config['mean_sq_dist_method'],
+                densify_dataset=densify_dataset,
+                gaussian_distribution=config['gaussian_distribution'],
+                quadtree_contrast_threshold=(
+                    config['quadtree_contrast_threshold']))
     else:
         # Initialize Parameters & Canoncial Camera parameters
-        params, variables, intrinsics, first_frame_w2c, cam = initialize_first_timestep(dataset, num_frames, 
-                                                                                        config['scene_radius_depth_ratio'],
-                                                                                        config['mean_sq_dist_method'],
-                                                                                        gaussian_distribution=config['gaussian_distribution'],
-                                                                                        quadtree_contrast_threshold=config['quadtree_contrast_threshold'],
-                                                                                        scene_name=config['data']['sequence'])
-    
+        params, variables, intrinsics, first_frame_w2c, cam = (
+            initialize_first_timestep(
+                dataset,
+                num_frames,
+                config['scene_radius_depth_ratio'],
+                config['mean_sq_dist_method'],
+                gaussian_distribution=config['gaussian_distribution'],
+                quadtree_contrast_threshold=(
+                    config['quadtree_contrast_threshold']),
+                scene_name=config['data']['sequence']))
+
     # Init seperate dataloader for tracking if required
     if seperate_tracking_res:
         tracking_dataset = get_dataset(
@@ -913,15 +1135,18 @@ def rgbd_slam(config: dict):
             use_train_split=dataset_config["use_train_split"],
         )
         tracking_color, _, tracking_intrinsics, _ = tracking_dataset[0]
-        tracking_color = tracking_color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+        tracking_color = tracking_color.permute(
+            2, 0, 1) / 255  # (H, W, C) -> (C, H, W)
         tracking_intrinsics = tracking_intrinsics[:3, :3]
-        tracking_cam = setup_camera(tracking_color.shape[2], tracking_color.shape[1], 
-                                    tracking_intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
-    
+        tracking_cam = setup_camera(tracking_color.shape[2],
+                                    tracking_color.shape[1],
+                                    tracking_intrinsics.cpu().numpy(),
+                                    first_frame_w2c.detach().cpu().numpy())
+
     # Initialize list to keep track of Keyframes
     keyframe_list = []
     keyframe_time_indices = []
-    
+
     # Init Variables to keep track of ground truth poses and runtimes
     gt_w2c_all_frames = []
     tracking_iter_time_sum = 0
@@ -937,15 +1162,26 @@ def rgbd_slam(config: dict):
     if config['load_checkpoint']:
         checkpoint_time_idx = config['checkpoint_time_idx']
         print(f"Loading Checkpoint for Frame {checkpoint_time_idx}")
-        ckpt_path = os.path.join(config['workdir'], config['run_name'], f"params{checkpoint_time_idx}.npz")
+        ckpt_path = os.path.join(config['workdir'], config['run_name'],
+                                 f"params{checkpoint_time_idx}.npz")
         params = dict(np.load(ckpt_path, allow_pickle=True))
-        params = {k: torch.tensor(params[k], device=device).float().requires_grad_(True) for k in params.keys()}
-        variables['max_2D_radius'] = torch.zeros(params['means3D'].shape[0], device=device).float()
-        variables['means2D_gradient_accum'] = torch.zeros(params['means3D'].shape[0], device=device).float()
-        variables['denom'] = torch.zeros(params['means3D'].shape[0], device=device).float()
-        variables['timestep'] = torch.zeros(params['means3D'].shape[0], device=device).float()
+        params = {
+            k: torch.tensor(params[k],
+                            device=device).float().requires_grad_(True)
+            for k in params.keys()
+        }
+        variables['max_2D_radius'] = torch.zeros(params['means3D'].shape[0],
+                                                 device=device).float()
+        variables['means2D_gradient_accum'] = torch.zeros(
+            params['means3D'].shape[0], device=device).float()
+        variables['denom'] = torch.zeros(params['means3D'].shape[0],
+                                         device=device).float()
+        variables['timestep'] = torch.zeros(params['means3D'].shape[0],
+                                            device=device).float()
         # Load the keyframe time idx list
-        keyframe_time_indices = np.load(os.path.join(config['workdir'], config['run_name'], f"keyframe_time_indices{checkpoint_time_idx}.npy"))
+        keyframe_time_indices = np.load(
+            os.path.join(config['workdir'], config['run_name'],
+                         f"keyframe_time_indices{checkpoint_time_idx}.npy"))
         keyframe_time_indices = keyframe_time_indices.tolist()
         # Update the ground truth poses list
         for time_idx in range(checkpoint_time_idx):
@@ -957,7 +1193,8 @@ def rgbd_slam(config: dict):
             # Initialize Keyframe List
             if time_idx in keyframe_time_indices:
                 # Get the estimated rotation & translation
-                curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
+                curr_cam_rot = F.normalize(
+                    params['cam_unnorm_rots'][..., time_idx].detach())
                 curr_cam_tran = params['cam_trans'][..., time_idx].detach()
                 curr_w2c = torch.eye(4, device=device).float()
                 curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
@@ -965,12 +1202,17 @@ def rgbd_slam(config: dict):
                 # Initialize Keyframe Info
                 color = color.permute(2, 0, 1) / 255
                 depth = depth.permute(2, 0, 1)
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
+                curr_keyframe = {
+                    'id': time_idx,
+                    'est_w2c': curr_w2c,
+                    'color': color,
+                    'depth': depth
+                }
                 # Add to keyframe list
                 keyframe_list.append(curr_keyframe)
     else:
         checkpoint_time_idx = 0
-    
+
     # Iterate over Scan: time_idx [0, ..., num_frames]
     for time_idx in tqdm(range(checkpoint_time_idx, num_frames)):
         # Load RGBD frames incrementally instead of all frames
@@ -980,11 +1222,11 @@ def rgbd_slam(config: dict):
         # Process RGB-D Data （color得是RGB 归一化格式）
         color = color.permute(2, 0, 1) / 255
         # Important！！！  Semantic Feature
-        # sem_feat = get_dinov2(color.clone().unsqueeze(0).cuda(), 
-        #                       config['data']['desired_image_height'], 
-        #                       config['data']['desired_image_width'], 
-        #                       num_cls=52, 
-        #                       edge=0, 
+        # sem_feat = get_dinov2(color.clone().unsqueeze(0).cuda(),
+        #                       config['data']['desired_image_height'],
+        #                       config['data']['desired_image_width'],
+        #                       num_cls=52,
+        #                       edge=0,
         #                       dim=16
         #                       ) # 获得 [1, 16, H, W]维度的高维度语义特征向量
         depth = depth.permute(2, 0, 1)
@@ -993,60 +1235,89 @@ def rgbd_slam(config: dict):
         # Optimize only current time step for tracking
         iter_time_idx = time_idx
         # Initialize Mapping Data for selected frame
-        curr_data = {'cam': cam, 
-                     'im': color, 
-                     'depth': depth, 
-                     'id': iter_time_idx, 
-                     'intrinsics': intrinsics, 
-                     'w2c': first_frame_w2c, 
-                     'iter_gt_w2c_list': curr_gt_w2c
-                    }
-        
+        curr_data = {
+            'cam': cam,
+            'im': color,
+            'depth': depth,
+            'id': iter_time_idx,
+            'intrinsics': intrinsics,
+            'w2c': first_frame_w2c,
+            'iter_gt_w2c_list': curr_gt_w2c
+        }
+
         # Initialize Data for Tracking
         if seperate_tracking_res:
             tracking_color, tracking_depth, _, _ = tracking_dataset[time_idx]
             tracking_color = tracking_color.permute(2, 0, 1) / 255
             tracking_depth = tracking_depth.permute(2, 0, 1)
-            tracking_curr_data = {'cam': tracking_cam, 'im': tracking_color, 'depth': tracking_depth, 'id': iter_time_idx,
-                                  'intrinsics': tracking_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+            tracking_curr_data = {
+                'cam': tracking_cam,
+                'im': tracking_color,
+                'depth': tracking_depth,
+                'id': iter_time_idx,
+                'intrinsics': tracking_intrinsics,
+                'w2c': first_frame_w2c,
+                'iter_gt_w2c_list': curr_gt_w2c
+            }
         else:
             tracking_curr_data = curr_data
 
         # Optimization Iterations
         coarse_num_iters_mapping = config['mapping']['coarse_num_iters']
         fine_num_iters_mapping = config['mapping']['fine_num_iters']
-        
+
         # Initialize the camera pose for the current frame
         # 根据匀速假设，更新相机位姿信息
         if time_idx > 0:
-            params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
+            params = initialize_camera_pose(
+                params,
+                time_idx,
+                forward_prop=config['tracking']['forward_prop'])
 
         # Tracking
         tracking_start_time = time.time()
         # 第0帧不进行位姿优化，且全程不用真实位姿
         if time_idx > 0 and not config['tracking']['use_gt_poses']:
             # Reset Optimizer & Learning Rates for tracking
-            optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
+            optimizer = initialize_optimizer(params,
+                                             config['tracking']['lrs'],
+                                             tracking=True)
             # Keep Track of Best Candidate Rotation & Translation
-            candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
-            candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+            candidate_cam_unnorm_rot = params['cam_unnorm_rots'][
+                ..., time_idx].detach().clone()
+            candidate_cam_tran = params['cam_trans'][...,
+                                                     time_idx].detach().clone()
             current_min_loss = float(1e20)
             # Tracking Optimization
             iter = 0
             do_continue_slam = False
             num_iters_tracking = config['tracking']['num_iters']
-            progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
+            progress_bar = tqdm(range(num_iters_tracking),
+                                desc=f"Tracking Time Step: {time_idx}")
             while True:
                 iter_start_time = time.time()
                 # Loss for current frame
-                loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
-                                                   config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
-                                                   config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
-                                                   plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                   tracking_iteration=iter)
+                loss, variables, losses = get_loss(
+                    params,
+                    tracking_curr_data,
+                    variables,
+                    iter_time_idx,
+                    config['tracking']['loss_weights'],
+                    config['tracking']['use_sil_for_loss'],
+                    config['tracking']['sil_thres'],
+                    config['tracking']['use_l1'],
+                    config['tracking']['ignore_outlier_depth_loss'],
+                    tracking=True,
+                    plot_dir=eval_dir,
+                    visualize_tracking_loss=config['tracking']
+                    ['visualize_tracking_loss'],
+                    tracking_iteration=iter)
                 if config['use_wandb']:
                     # Report Loss
-                    wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
+                    wandb_tracking_step = report_loss(losses,
+                                                      wandb_run,
+                                                      wandb_tracking_step,
+                                                      tracking=True)
                 # Backprop
                 loss.backward()
                 # Optimizer Update
@@ -1056,15 +1327,33 @@ def rgbd_slam(config: dict):
                     # Save the best candidate rotation & translation
                     if loss < current_min_loss:
                         current_min_loss = loss
-                        candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
-                        candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+                        candidate_cam_unnorm_rot = params['cam_unnorm_rots'][
+                            ..., time_idx].detach().clone()
+                        candidate_cam_tran = params['cam_trans'][
+                            ..., time_idx].detach().clone()
                     # Report Progress
-                    if config['report_iter_progress']: # False
+                    if config['report_iter_progress']:  # False
                         if config['use_wandb']:
-                            report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
-                                            wandb_run=wandb_run, wandb_step=wandb_tracking_step, wandb_save_qual=config['wandb']['save_qual'])
+                            report_progress(
+                                params,
+                                tracking_curr_data,
+                                iter + 1,
+                                progress_bar,
+                                iter_time_idx,
+                                sil_thres=config['tracking']['sil_thres'],
+                                tracking=True,
+                                wandb_run=wandb_run,
+                                wandb_step=wandb_tracking_step,
+                                wandb_save_qual=config['wandb']['save_qual'])
                         else:
-                            report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+                            report_progress(
+                                params,
+                                tracking_curr_data,
+                                iter + 1,
+                                progress_bar,
+                                iter_time_idx,
+                                sil_thres=config['tracking']['sil_thres'],
+                                tracking=True)
                     else:
                         progress_bar.update(1)
                 # Update the runtime numbers
@@ -1074,23 +1363,33 @@ def rgbd_slam(config: dict):
                 # Check if we should stop tracking
                 iter += 1
                 if iter == num_iters_tracking:
-                    if losses['depth'] < config['tracking']['depth_loss_thres'] and config['tracking']['use_depth_loss_thres']:
+                    if losses['depth'] < config['tracking'][
+                            'depth_loss_thres'] and config['tracking'][
+                                'use_depth_loss_thres']:
                         break
                     # 如果没达到 depth_loss_thres 的话，迭代次数翻倍，继续循环
-                    elif config['tracking']['use_depth_loss_thres'] and not do_continue_slam:
+                    elif config['tracking'][
+                            'use_depth_loss_thres'] and not do_continue_slam:
                         do_continue_slam = True
-                        progress_bar = tqdm(range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}")
-                        num_iters_tracking = 2*num_iters_tracking
+                        progress_bar = tqdm(
+                            range(num_iters_tracking),
+                            desc=f"Tracking Time Step: {time_idx}")
+                        num_iters_tracking = 2 * num_iters_tracking
                         if config['use_wandb']:
-                            wandb_run.log({"Tracking/Extra Tracking Iters Frames": time_idx,
-                                        "Tracking/step": wandb_time_step})
+                            wandb_run.log({
+                                "Tracking/Extra Tracking Iters Frames":
+                                    time_idx,
+                                "Tracking/step":
+                                    wandb_time_step
+                            })
                     else:
                         break
 
             progress_bar.close()
             # Copy over the best candidate rotation & translation 更新相机位姿参数
             with torch.no_grad():
-                params['cam_unnorm_rots'][..., time_idx] = candidate_cam_unnorm_rot
+                params['cam_unnorm_rots'][...,
+                                          time_idx] = candidate_cam_unnorm_rot
                 params['cam_trans'][..., time_idx] = candidate_cam_tran
         elif time_idx > 0 and config['tracking']['use_gt_poses']:
             with torch.no_grad():
@@ -1107,156 +1406,113 @@ def rgbd_slam(config: dict):
         tracking_frame_time_sum += tracking_end_time - tracking_start_time
         tracking_frame_time_count += 1
 
-        if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0: # 每 report_global_progress_every 帧报告一次
+        # 每 report_global_progress_every 帧报告一次
+        if time_idx == 0 or (time_idx +
+                             1) % config['report_global_progress_every'] == 0:
             try:
                 # Report Final Tracking Progress
-                progress_bar = tqdm(range(1), desc=f"Tracking Result Time Step: {time_idx}")
+                progress_bar = tqdm(
+                    range(1), desc=f"Tracking Result Time Step: {time_idx}")
                 with torch.no_grad():
                     if config['use_wandb']:
-                        report_progress(params, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
-                                        wandb_run=wandb_run, wandb_step=wandb_time_step, wandb_save_qual=config['wandb']['save_qual'], global_logging=True)
+                        report_progress(
+                            params,
+                            tracking_curr_data,
+                            1,
+                            progress_bar,
+                            iter_time_idx,
+                            sil_thres=config['tracking']['sil_thres'],
+                            tracking=True,
+                            wandb_run=wandb_run,
+                            wandb_step=wandb_time_step,
+                            wandb_save_qual=config['wandb']['save_qual'],
+                            global_logging=True)
                     else:
-                        report_progress(params, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+                        report_progress(
+                            params,
+                            tracking_curr_data,
+                            1,
+                            progress_bar,
+                            iter_time_idx,
+                            sil_thres=config['tracking']['sil_thres'],
+                            tracking=True)
                 progress_bar.close()
-            except:
-                ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
+            except BaseException:
+                ckpt_output_dir = os.path.join(config["workdir"],
+                                               config["run_name"])
                 save_params_ckpt(params, ckpt_output_dir, time_idx)
                 print('Failed to evaluate trajectory.')
 
         # Densification & KeyFrame-based Mapping（slam肯定是每帧都建图）
-        if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
+        if time_idx == 0 or (time_idx + 1) % config['map_every'] == 0:
             # Densification （第0帧不densify，因为已经初始化高斯基元了）
             if config['mapping']['add_new_gaussians'] and time_idx > 0:
                 # Setup Data for Densification
                 if seperate_densification_res:
                     # Load RGBD frames incrementally instead of all frames
-                    densify_color, densify_depth, _, _ = densify_dataset[time_idx]
+                    densify_color, densify_depth, _, _ = densify_dataset[
+                        time_idx]
                     densify_color = densify_color.permute(2, 0, 1) / 255
                     densify_depth = densify_depth.permute(2, 0, 1)
-                    densify_curr_data = {'cam': densify_cam, 'im': densify_color, 'depth': densify_depth, 'id': time_idx, 
-                                 'intrinsics': densify_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
+                    densify_curr_data = {
+                        'cam': densify_cam,
+                        'im': densify_color,
+                        'depth': densify_depth,
+                        'id': time_idx,
+                        'intrinsics': densify_intrinsics,
+                        'w2c': first_frame_w2c,
+                        'iter_gt_w2c_list': curr_gt_w2c
+                    }
                 else:
                     densify_curr_data = curr_data
-                '''
-                # Add new Gaussians to the scene based on the Silhouette在这里加一个bool位，判断是否将本帧视为关键帧
-                params, variables = add_new_gaussians(params, variables, densify_curr_data, 
-                                                      config['mapping']['sil_thres'], time_idx,
-                                                      config['mean_sq_dist_method'], config['gaussian_distribution'],
-                                                      config['quadtree_contrast_threshold'],
-                                                      config['data']['sequence'])
-                '''
                 post_num_pts = params['means3D'].shape[0]
                 if config['use_wandb']:
-                    wandb_run.log({"Mapping/Number of Gaussians": post_num_pts,
-                                   "Mapping/step": wandb_time_step})
-            
+                    wandb_run.log({
+                        "Mapping/Number of Gaussians": post_num_pts,
+                        "Mapping/step": wandb_time_step
+                    })
+
             with torch.no_grad():
                 # Get the current estimated rotation & translation
-                curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
+                curr_cam_rot = F.normalize(
+                    params['cam_unnorm_rots'][..., time_idx].detach())
                 curr_cam_tran = params['cam_trans'][..., time_idx].detach()
                 curr_w2c = torch.eye(4, device=device).float()
                 curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                 curr_w2c[:3, 3] = curr_cam_tran
 
-
             mapping_start_time = time.time()
-            '''
-            # Reset Optimizer & Learning Rates for Full Map Optimization
-            # Coarse lrs
-            optimizer = initialize_optimizer(params, config['mapping']['coarse_lrs'], tracking=False) 
-
-            # Mapping
-            mapping_start_time = time.time()
-            if coarse_num_iters_mapping > 0 and time_idx==0:
-                coarse_num_iters_mapping_1 = coarse_num_iters_mapping+30
-                progress_bar = tqdm(range(coarse_num_iters_mapping_1), desc=f"Coarse Mapping Time Step: {time_idx}")
-            elif coarse_num_iters_mapping > 0:
-                coarse_num_iters_mapping_1 = coarse_num_iters_mapping
-                progress_bar = tqdm(range(coarse_num_iters_mapping_1), desc=f"Coarse Mapping Time Step: {time_idx}")
-            
-            # Coarse Mapping
-            for iter in range(coarse_num_iters_mapping_1):
-                iter_start_time = time.time()
-
-                # Use Current Frame Data
-                iter_time_idx = time_idx
-                iter_color = color
-                iter_depth = depth
-
-                iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
-                             'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
-                # Loss for current frame
-                loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                                                config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], 
-                                                mapping=True)
-                if config['use_wandb']:
-                    # Report Loss
-                    wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
-                # Backprop
-                loss.backward()
-                with torch.no_grad():
-                    # Prune Gaussians
-                    if config['mapping']['prune_gaussians']:
-                        params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
-                        if config['use_wandb']:
-                            wandb_run.log({"Mapping/Number of Gaussians - Pruning": params['means3D'].shape[0],
-                                           "Mapping/step": wandb_mapping_step})
-                    # Gaussian-Splatting's Gradient-based Densification 不用use_gaussian_splatting_densification
-                    if config['mapping']['use_gaussian_splatting_densification']:
-                        params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
-                        if config['use_wandb']:
-                            wandb_run.log({"Mapping/Number of Gaussians - Densification": params['means3D'].shape[0],
-                                           "Mapping/step": wandb_mapping_step})
-                    # Optimizer Update
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    # Report Progress
-                    if config['report_iter_progress']:
-                        if config['use_wandb']:
-                            report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            wandb_run=wandb_run, wandb_step=wandb_mapping_step, wandb_save_qual=config['wandb']['save_qual'],
-                                            mapping=True, online_time_idx=time_idx)
-                        else:
-                            report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            mapping=True, online_time_idx=time_idx)
-                    else:
-                        progress_bar.update(1)
-                # Update the runtime numbers
-                iter_end_time = time.time()
-                mapping_iter_time_sum += iter_end_time - iter_start_time
-                mapping_iter_time_count += 1
-            if coarse_num_iters_mapping_1 > 0:
-                progress_bar.close()
-            # End of Coarse Mapping
-
-            torch.cuda.empty_cache()
-            '''
-
 
             # finer densification
-            params, variables = add_finer_gaussians(params, variables, curr_data, config['mapping']['sil_thres'], 
-                                                    config['mapping']['color_thres'], time_idx,
-                                                    config['mean_sq_dist_method'], config['gaussian_distribution'])
-            
+            params, variables = add_finer_gaussians(
+                params, variables, curr_data, config['mapping']['sil_thres'],
+                config['mapping']['color_thres'], time_idx,
+                config['mean_sq_dist_method'], config['gaussian_distribution'])
+
             # Finer lrs
-            optimizer = initialize_optimizer(params, config['mapping']['fine_lrs'], tracking=False)
+            optimizer = initialize_optimizer(params,
+                                             config['mapping']['fine_lrs'],
+                                             tracking=False)
 
             if fine_num_iters_mapping > 0:
-                progress_bar = tqdm(range(fine_num_iters_mapping), desc=f"Fine Mapping Time Step: {time_idx}")
+                progress_bar = tqdm(range(fine_num_iters_mapping),
+                                    desc=f"Fine Mapping Time Step: {time_idx}")
             # Fine Mapping
             for iter in range(fine_num_iters_mapping):
                 iter_start_time = time.time()
 
-                if iter % 10 == 0: # 定期选择当前帧
+                if iter % 10 == 0:  # 定期选择当前帧
                     selected_rand_keyframe_idx = len(keyframe_time_indices)
                 else:
-                    candidate_frame_list = np.append(np.array(keyframe_time_indices), time_idx)
-                    probability_list = np.exp(-candidate_frame_list ** 2 / 2 / 4000 / 4000)
-                    cumulative_f_gaussian = np.cumsum(probability_list) / np.sum(probability_list)
+                    candidate_frame_list = np.append(
+                        np.array(keyframe_time_indices), time_idx)
+                    probability_list = np.exp(-candidate_frame_list**2 / 2 /
+                                              4000 / 4000)
+                    cumulative_f_gaussian = np.cumsum(
+                        probability_list) / np.sum(probability_list)
                     random_number = np.random.rand()
-                    selected_rand_keyframe_idx = np.searchsorted(cumulative_f_gaussian, random_number)
+                    selected_rand_keyframe_idx = np.searchsorted(
+                        cumulative_f_gaussian, random_number)
                 if selected_rand_keyframe_idx == len(keyframe_time_indices):
                     # Use Current Frame Data
                     iter_time_idx = time_idx
@@ -1264,47 +1520,98 @@ def rgbd_slam(config: dict):
                     iter_depth = depth
                 else:
                     # Use Keyframe Data
-                    iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
-                    iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
-                    iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
+                    iter_time_idx = keyframe_list[selected_rand_keyframe_idx][
+                        'id']
+                    iter_color = keyframe_list[selected_rand_keyframe_idx][
+                        'color']
+                    iter_depth = keyframe_list[selected_rand_keyframe_idx][
+                        'depth']
 
-                iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-                iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
-                             'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
+                iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx + 1]
+                iter_data = {
+                    'cam': cam,
+                    'im': iter_color,
+                    'depth': iter_depth,
+                    'id': iter_time_idx,
+                    'intrinsics': intrinsics,
+                    'w2c': first_frame_w2c,
+                    'iter_gt_w2c_list': iter_gt_w2c
+                }
                 # Loss for current frame
-                loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                                                config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
+                loss, variables, losses = get_loss(
+                    params,
+                    iter_data,
+                    variables,
+                    iter_time_idx,
+                    config['mapping']['loss_weights'],
+                    config['mapping']['use_sil_for_loss'],
+                    config['mapping']['sil_thres'],
+                    config['mapping']['use_l1'],
+                    config['mapping']['ignore_outlier_depth_loss'],
+                    mapping=True)
                 if config['use_wandb']:
                     # Report Loss
-                    wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
+                    wandb_mapping_step = report_loss(losses,
+                                                     wandb_run,
+                                                     wandb_mapping_step,
+                                                     mapping=True)
                 # Backprop
                 loss.backward()
                 with torch.no_grad():
                     # Prune Gaussians
                     if config['mapping']['prune_gaussians']:
-                        params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
+                        params, variables = prune_gaussians(
+                            params, variables, optimizer, iter,
+                            config['mapping']['pruning_dict'])
                         if config['use_wandb']:
-                            wandb_run.log({"Mapping/Number of Gaussians - Pruning": params['means3D'].shape[0],
-                                           "Mapping/step": wandb_mapping_step})
-                    # Gaussian-Splatting's Gradient-based Densification 不用use_gaussian_splatting_densification
-                    if config['mapping']['use_gaussian_splatting_densification']:
-                        params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
+                            wandb_run.log({
+                                "Mapping/Number of Gaussians - Pruning":
+                                    params['means3D'].shape[0],
+                                "Mapping/step":
+                                    wandb_mapping_step
+                            })
+                    # Gaussian-Splatting's Gradient-based Densification
+                    # 不用use_gaussian_splatting_densification
+                    if config['mapping'][
+                            'use_gaussian_splatting_densification']:
+                        params, variables = densify(
+                            params, variables, optimizer, iter,
+                            config['mapping']['densify_dict'])
                         if config['use_wandb']:
-                            wandb_run.log({"Mapping/Number of Gaussians - Densification": params['means3D'].shape[0],
-                                           "Mapping/step": wandb_mapping_step})
+                            wandb_run.log({
+                                "Mapping/Number of Gaussians - Densification":
+                                    params['means3D'].shape[0],
+                                "Mapping/step":
+                                    wandb_mapping_step
+                            })
                     # Optimizer Update
                     optimizer.step()
                     optimizer.zero_grad(set_to_none=True)
                     # Report Progress
                     if config['report_iter_progress']:
                         if config['use_wandb']:
-                            report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            wandb_run=wandb_run, wandb_step=wandb_mapping_step, wandb_save_qual=config['wandb']['save_qual'],
-                                            mapping=True, online_time_idx=time_idx)
+                            report_progress(
+                                params,
+                                iter_data,
+                                iter + 1,
+                                progress_bar,
+                                iter_time_idx,
+                                sil_thres=config['mapping']['sil_thres'],
+                                wandb_run=wandb_run,
+                                wandb_step=wandb_mapping_step,
+                                wandb_save_qual=config['wandb']['save_qual'],
+                                mapping=True,
+                                online_time_idx=time_idx)
                         else:
-                            report_progress(params, iter_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            mapping=True, online_time_idx=time_idx)
+                            report_progress(
+                                params,
+                                iter_data,
+                                iter + 1,
+                                progress_bar,
+                                iter_time_idx,
+                                sil_thres=config['mapping']['sil_thres'],
+                                mapping=True,
+                                online_time_idx=time_idx)
                     else:
                         progress_bar.update(1)
                 # Update the runtime numbers
@@ -1320,108 +1627,147 @@ def rgbd_slam(config: dict):
             mapping_frame_time_sum += mapping_end_time - mapping_start_time
             mapping_frame_time_count += 1
 
-            if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
+            if time_idx == 0 or (
+                    time_idx + 1) % config['report_global_progress_every'] == 0:
                 try:
                     # Report Mapping Progress
-                    progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
+                    progress_bar = tqdm(
+                        range(1), desc=f"Mapping Result Time Step: {time_idx}")
                     with torch.no_grad():
                         if config['use_wandb']:
-                            report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            wandb_run=wandb_run, wandb_step=wandb_time_step, wandb_save_qual=config['wandb']['save_qual'],
-                                            mapping=True, online_time_idx=time_idx, global_logging=True)
+                            report_progress(
+                                params,
+                                curr_data,
+                                1,
+                                progress_bar,
+                                time_idx,
+                                sil_thres=config['mapping']['sil_thres'],
+                                wandb_run=wandb_run,
+                                wandb_step=wandb_time_step,
+                                wandb_save_qual=config['wandb']['save_qual'],
+                                mapping=True,
+                                online_time_idx=time_idx,
+                                global_logging=True)
                         else:
-                            report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            mapping=True, online_time_idx=time_idx)
+                            report_progress(
+                                params,
+                                curr_data,
+                                1,
+                                progress_bar,
+                                time_idx,
+                                sil_thres=config['mapping']['sil_thres'],
+                                mapping=True,
+                                online_time_idx=time_idx)
                     progress_bar.close()
-                except:
-                    ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
+                except BaseException:
+                    ckpt_output_dir = os.path.join(config["workdir"],
+                                                   config["run_name"])
                     save_params_ckpt(params, ckpt_output_dir, time_idx)
                     print('Failed to evaluate trajectory.')
-        
-        # Add frame to keyframe list 增加关键帧（第一帧、距离上一个关键帧已经隔了keyframe_every帧、倒数第2帧）
-        # if ((time_idx == 0) or (not is_KeyFrame and (time_idx-keyframe_time_indices[-1]) % config['keyframe_every'] == 0) or \
-        #             (time_idx == num_frames-2) or is_KeyFrame) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
-        # if ((time_idx == 0) or (time_idx == num_frames-2) or is_KeyFrame) and \
-        #     (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
-        # if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
-        #             (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
-        if ((time_idx) % config['keyframe_every'] == 0) and \
-            (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
+
+        # Add frame to keyframe list
+        # 增加关键帧（第一帧、距离上一个关键帧已经隔了keyframe_every帧、倒数第2帧）
+        # if ((time_idx == 0) or (not is_KeyFrame and
+        # (time_idx-keyframe_time_indices[-1]) % config['keyframe_every'] == 0)
+        # or \
+        # (time_idx == num_frames-2) or is_KeyFrame) and (not
+        # torch.isinf(curr_gt_w2c[-1]).any()) and (not
+        # torch.isnan(curr_gt_w2c[-1]).any()):
+        # if ((time_idx == 0) or (time_idx == num_frames-2) or is_KeyFrame) and
+        # \
+        # (not torch.isinf(curr_gt_w2c[-1]).any()) and (not
+        # torch.isnan(curr_gt_w2c[-1]).any()):
+        # if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0)
+        # or \
+        # (time_idx == num_frames-2)) and (not
+        # torch.isinf(curr_gt_w2c[-1]).any()) and (not
+        # torch.isnan(curr_gt_w2c[-1]).any()):
+        if ((time_idx) % config['keyframe_every']
+                == 0) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (
+                    not torch.isnan(curr_gt_w2c[-1]).any()):
             with torch.no_grad():
                 # Get the current estimated rotation & translation
-                curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
+                curr_cam_rot = F.normalize(
+                    params['cam_unnorm_rots'][..., time_idx].detach())
                 curr_cam_tran = params['cam_trans'][..., time_idx].detach()
                 curr_w2c = torch.eye(4, device=device).float()
                 curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                 curr_w2c[:3, 3] = curr_cam_tran
                 # Initialize Keyframe Info
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
+                curr_keyframe = {
+                    'id': time_idx,
+                    'est_w2c': curr_w2c,
+                    'color': color,
+                    'depth': depth
+                }
                 # Add to keyframe list
                 keyframe_list.append(curr_keyframe)
                 keyframe_time_indices.append(time_idx)
-        
+
         # Checkpoint every iteration
-        if config['save_checkpoints'] and time_idx % config["checkpoint_interval"] == 0:
-            ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
+        if config['save_checkpoints'] and time_idx % config[
+                "checkpoint_interval"] == 0:
+            ckpt_output_dir = os.path.join(config["workdir"],
+                                           config["run_name"])
             save_params_ckpt(params, ckpt_output_dir, time_idx)
-            np.save(os.path.join(ckpt_output_dir, f"keyframe_time_indices{time_idx}.npy"), np.array(keyframe_time_indices))
-        
+            np.save(
+                os.path.join(ckpt_output_dir,
+                             f"keyframe_time_indices{time_idx}.npy"),
+                np.array(keyframe_time_indices))
+
         # Increment WandB Time Step
         if config['use_wandb']:
             wandb_time_step += 1
 
         torch.cuda.empty_cache()
-
-    '''
-    # Global Optimization
-    optimizer = initialize_optimizer(params, config['mapping']['global_lrs'], tracking=False)
-    for global_time_idx in tqdm(range(10 * len(keyframe_time_indices))):
-        # rand_idx = np.random.randint(0, len(keyframe_time_indices))
-        selected_rand_keyframe_idx = np.random.randint(0, len(keyframe_list))
-        # Use Keyframe Data
-        iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
-        iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
-        iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
-        iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-        iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
-                        'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
-        # Loss for current frame
-        loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                                        config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                        config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True, do_ba=True)
-        # Backprop
-        loss.backward()
-        # Optimizer Update
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
-        torch.cuda.empty_cache()
-    '''
     if config['global_optimization']:
         global_optimization_start_time = time.time()
         # Global Optimization
-        optimizer = initialize_optimizer(params, config['mapping']['global_lrs_1'], tracking=False) 
-        for global_time_idx in tqdm(range(config['global_times'] * len(keyframe_list))):
-            selected_rand_keyframe_idx = np.random.randint(0, len(keyframe_list))
+        optimizer = initialize_optimizer(params,
+                                         config['mapping']['global_lrs_1'],
+                                         tracking=False)
+        for global_time_idx in tqdm(
+                range(config['global_times'] * len(keyframe_list))):
+            selected_rand_keyframe_idx = np.random.randint(
+                0, len(keyframe_list))
             iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
             iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
             iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
-            iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
-            iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx, 
-                            'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
+            iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx + 1]
+            iter_data = {
+                'cam': cam,
+                'im': iter_color,
+                'depth': iter_depth,
+                'id': iter_time_idx,
+                'intrinsics': intrinsics,
+                'w2c': first_frame_w2c,
+                'iter_gt_w2c_list': iter_gt_w2c
+            }
             # Loss for current frame
-            loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                                               config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                               config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'],
-                                               mapping=True)
+            loss, variables, losses = get_loss(
+                params,
+                iter_data,
+                variables,
+                iter_time_idx,
+                config['mapping']['loss_weights'],
+                config['mapping']['use_sil_for_loss'],
+                config['mapping']['sil_thres'],
+                config['mapping']['use_l1'],
+                config['mapping']['ignore_outlier_depth_loss'],
+                mapping=True)
             loss.backward()
             with torch.no_grad():
-                    # Prune Gaussians
-                    if config['mapping']['prune_gaussians']:
-                        params, variables = prune_gaussians(params, variables, optimizer, global_time_idx, config['mapping']['pruning_dict_global_optimization'])
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-        Total_Global_Optimization_Time = time.time()-global_optimization_start_time
-        print("Total Global Optimization Time: %f s"%(Total_Global_Optimization_Time))
+                # Prune Gaussians
+                if config['mapping']['prune_gaussians']:
+                    params, variables = prune_gaussians(
+                        params, variables, optimizer, global_time_idx,
+                        config['mapping']['pruning_dict_global_optimization'])
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+        Total_Global_Optimization_Time = time.time(
+        ) - global_optimization_start_time
+        print("Total Global Optimization Time: %f s" %
+              (Total_Global_Optimization_Time))
 
     # Compute Average Runtimes
     if tracking_iter_time_count == 0:
@@ -1431,40 +1777,40 @@ def rgbd_slam(config: dict):
         mapping_iter_time_count = 1
         mapping_frame_time_count = 1
     tracking_iter_time_avg = tracking_iter_time_sum / tracking_iter_time_count
-    tracking_frame_time_avg = tracking_frame_time_sum / tracking_frame_time_count
+    tracking_frame_time_avg = (tracking_frame_time_sum /
+                               tracking_frame_time_count)
     mapping_iter_time_avg = mapping_iter_time_sum / mapping_iter_time_count
     mapping_frame_time_avg = mapping_frame_time_sum / mapping_frame_time_count
-    print(f"\nAverage Tracking/Iteration Time: {tracking_iter_time_avg*1000} ms")
+    print(
+        f"\nAverage Tracking/Iteration Time: {tracking_iter_time_avg*1000} ms")
     print(f"Average Tracking/Frame Time: {tracking_frame_time_avg} s")
     print(f"Average Mapping/Iteration Time: {mapping_iter_time_avg*1000} ms")
     print(f"Average Mapping/Frame Time: {mapping_frame_time_avg} s")
     if config['use_wandb']:
-        wandb_run.log({"Final Stats/Average Tracking Iteration Time (ms)": tracking_iter_time_avg*1000,
-                       "Final Stats/Average Tracking Frame Time (s)": tracking_frame_time_avg,
-                       "Final Stats/Average Mapping Iteration Time (ms)": mapping_iter_time_avg*1000,
-                       "Final Stats/Average Mapping Frame Time (s)": mapping_frame_time_avg,
-                       "Final Stats/step": 1})
+        wandb_run.log({
+            "Final Stats/Average Tracking Iteration Time (ms)":
+                tracking_iter_time_avg * 1000,
+            "Final Stats/Average Tracking Frame Time (s)":
+                tracking_frame_time_avg,
+            "Final Stats/Average Mapping Iteration Time (ms)":
+                mapping_iter_time_avg * 1000,
+            "Final Stats/Average Mapping Frame Time (s)":
+                mapping_frame_time_avg,
+            "Final Stats/step":
+                1
+        })
     else:
         with open(os.path.join(eval_dir, "RunTime.txt"), "w") as f:
-            f.write("Average Tracking Iteration Time: %.6f ms \n"%(tracking_iter_time_avg*1000))
-            f.write("Average Tracking Frame Time: %.6f s \n"%(tracking_frame_time_avg))
-            f.write("Average Mapping Iteration Time: %.6f ms \n"%(mapping_iter_time_avg*1000))
-            f.write("Average Mapping Frame Time: %.6f s \n"%(mapping_frame_time_avg))
-            f.write("Total Global Optimization Time: %.6f s \n"%(Total_Global_Optimization_Time))
-    
-    '''
-    # # Evaluate Final Parameters
-    # with torch.no_grad():
-    #     if config['use_wandb']:
-    #         eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-    #              wandb_run=wandb_run, wandb_save_qual=config['wandb']['eval_save_qual'],
-    #              mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-    #              eval_every=config['eval_every'])
-    #     else:
-    #         eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-    #              mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-    #              eval_every=config['eval_every'])
-    '''
+            f.write("Average Tracking Iteration Time: %.6f ms \n" %
+                    (tracking_iter_time_avg * 1000))
+            f.write("Average Tracking Frame Time: %.6f s \n" %
+                    (tracking_frame_time_avg))
+            f.write("Average Mapping Iteration Time: %.6f ms \n" %
+                    (mapping_iter_time_avg * 1000))
+            f.write("Average Mapping Frame Time: %.6f s \n" %
+                    (mapping_frame_time_avg))
+            f.write("Total Global Optimization Time: %.6f s \n" %
+                    (Total_Global_Optimization_Time))
 
     # Add Camera Parameters to Save them
     params['intrinsics'] = intrinsics.detach().cpu().numpy()
@@ -1483,22 +1829,30 @@ def rgbd_slam(config: dict):
     # Evaluate Final Parameters
     with torch.no_grad():
         if config['use_wandb']:
-            eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                 wandb_run=wandb_run, wandb_save_qual=config['wandb']['eval_save_qual'],
-                 mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
+            eval(dataset,
+                 params,
+                 num_frames,
+                 eval_dir,
+                 sil_thres=config['mapping']['sil_thres'],
+                 wandb_run=wandb_run,
+                 wandb_save_qual=config['wandb']['eval_save_qual'],
+                 mapping_iters=config['mapping']['num_iters'],
+                 add_new_gaussians=config['mapping']['add_new_gaussians'],
                  eval_every=config['eval_every'])
         else:
-            eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                 mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
+            eval(dataset,
+                 params,
+                 num_frames,
+                 eval_dir,
+                 sil_thres=config['mapping']['sil_thres'],
+                 mapping_iters=config['mapping']['num_iters'],
+                 add_new_gaussians=config['mapping']['add_new_gaussians'],
                  eval_every=config['eval_every'])
-    '''
-    # Save Parameters
-    save_params(params, output_dir)
-    '''
 
     # Close WandB Run
     if config['use_wandb']:
         wandb.finish()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -1507,18 +1861,16 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    experiment = SourceFileLoader(
-        os.path.basename(args.experiment), args.experiment
-    ).load_module()
+    experiment = SourceFileLoader(os.path.basename(args.experiment),
+                                  args.experiment).load_module()
 
     # Set Experiment Seed
     seed_everything(seed=experiment.config['seed'])
-    
+
     # Create Results Directory and Copy Config 保存最终结果的目录地址
-    results_dir = os.path.join(
-        experiment.config["workdir"], experiment.config["run_name"]
-    )
-    if not experiment.config['load_checkpoint']: # 如果不 load_checkpoint 的话
+    results_dir = os.path.join(experiment.config["workdir"],
+                               experiment.config["run_name"])
+    if not experiment.config['load_checkpoint']:  # 如果不 load_checkpoint 的话
         os.makedirs(results_dir, exist_ok=True)
         # 把配置文件复制一份到结果目录下
         shutil.copy(args.experiment, os.path.join(results_dir, "config.py"))

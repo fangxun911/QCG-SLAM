@@ -2,12 +2,12 @@ import os
 from os.path import join as p_join
 from datetime import datetime
 
+scenes = [
+    "room0", "room1", "room2", "office0", "office1", "office2", "office3",
+    "office4"
+]
 
-scenes = ["room0", "room1", "room2",
-          "office0", "office1", "office2",
-          "office3", "office4"]
-
-primary_device="cuda:0" # 这里一定要指明设备号
+primary_device = "cuda:0"  # 这里一定要指明设备号
 seed = 0
 scene_name = scenes[3]
 
@@ -27,22 +27,25 @@ config = dict(
     run_name=run_name,
     seed=seed,
     primary_device=primary_device,
-    map_every=map_every, # Mapping every nth frame
-    keyframe_every=keyframe_every, # Keyframe every nth frame
-    mapping_window_size=mapping_window_size, # Mapping window size
-    report_global_progress_every=2000, # Report Global Progress every nth frame
-    eval_every=5, # Evaluate every nth frame (at end of SLAM)
-    scene_radius_depth_ratio=3, # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
-    mean_sq_dist_method="projective", # ["projective", "knn"] (Type of Mean Squared Distance Calculation for Scale of Gaussians)
-    gaussian_distribution="isotropic", # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
-    quadtree_contrast_threshold=0.01, # 四叉树对比度阈值要求
+    map_every=map_every,  # Mapping every nth frame
+    keyframe_every=keyframe_every,  # Keyframe every nth frame
+    mapping_window_size=mapping_window_size,  # Mapping window size
+    report_global_progress_every=2000,  # Report Global Progress every nth frame
+    eval_every=5,  # Evaluate every nth frame (at end of SLAM)
+    # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
+    scene_radius_depth_ratio=3,
+    # Mean-squared distance method: "projective" or "knn".
+    mean_sq_dist_method="projective",
+    # Gaussian covariance: "isotropic" or "anisotropic".
+    gaussian_distribution="isotropic",
+    quadtree_contrast_threshold=0.01,  # 四叉树对比度阈值要求
     global_optimization=True,
     global_times=20,
-    report_iter_progress=False, # 是否每帧都report
-    load_checkpoint=False, # 是否加载预训练模型
+    report_iter_progress=False,  # 是否每帧都report
+    load_checkpoint=False,  # 是否加载预训练模型
     checkpoint_time_idx=0,
-    save_checkpoints=False, # Save Checkpoints
-    checkpoint_interval=500, # Checkpoint Interval
+    save_checkpoints=False,  # Save Checkpoints
+    checkpoint_interval=500,  # Checkpoint Interval
     use_wandb=True,
     wandb=dict(
         entity="CITLab",
@@ -64,13 +67,13 @@ config = dict(
         num_frames=-1,
     ),
     tracking=dict(
-        use_gt_poses=False, # Use GT Poses for Tracking
-        forward_prop=True, # Forward Propagate Poses
+        use_gt_poses=False,  # Use GT Poses for Tracking
+        forward_prop=True,  # Forward Propagate Poses
         num_iters=tracking_iters,
         use_sil_for_loss=True,
         sil_thres=0.99,
         use_l1=True,
-        ignore_outlier_depth_loss=False, # 不考虑深度误差大的区域
+        ignore_outlier_depth_loss=False,  # 不考虑深度误差大的区域
         loss_weights=dict(
             im=0.5,
             depth=1.0,
@@ -90,7 +93,7 @@ config = dict(
         fine_num_iters=fine_mapping_iters,
         num_iters=coarse_mapping_iters + fine_mapping_iters,
         add_new_gaussians=True,
-        sil_thres=0.5, # For Addition of new Gaussians
+        sil_thres=0.5,  # For Addition of new Gaussians
         color_thres=0.5,
         use_l1=True,
         use_sil_for_loss=False,
@@ -135,31 +138,35 @@ config = dict(
             cam_unnorm_rots=0.0000,
             cam_trans=0.000,
         ),
-        prune_gaussians=True, # Prune Gaussians during Mapping
-        pruning_dict=dict( # Needs to be updated based on the number of mapping iterations
+        prune_gaussians=True,  # Prune Gaussians during Mapping
+        # Tune based on the number of mapping iterations.
+        pruning_dict=dict(
             start_after=0,
             remove_big_after=0,
             stop_after=20,
-            prune_big = False,
+            prune_big=False,
             prune_every=20,
             removal_opacity_threshold=0.005,
             final_removal_opacity_threshold=0.005,
             reset_opacities=False,
-            reset_opacities_every=500, # Doesn't consider iter 0
+            reset_opacities_every=500,  # Doesn't consider iter 0
         ),
-        pruning_dict_global_optimization=dict( # Needs to be updated based on the number of mapping iterations
+        # Tune based on the number of mapping iterations.
+        pruning_dict_global_optimization=dict(
             start_after=0,
             remove_big_after=0,
             stop_after=6000,
-            prune_big = False,
+            prune_big=False,
             prune_every=200,
             removal_opacity_threshold=0.005,
             final_removal_opacity_threshold=0.005,
             reset_opacities=False,
-            reset_opacities_every=500, # Doesn't consider iter 0
+            reset_opacities_every=500,  # Doesn't consider iter 0
         ),
-        use_gaussian_splatting_densification=False, # Use Gaussian Splatting-based Densification during Mapping
-        densify_dict=dict( # Needs to be updated based on the number of mapping iterations
+        # Use Gaussian Splatting-based densification during mapping.
+        use_gaussian_splatting_densification=False,
+        # Tune based on the number of mapping iterations.
+        densify_dict=dict(
             start_after=500,
             remove_big_after=3000,
             stop_after=5000,
@@ -168,18 +175,22 @@ config = dict(
             num_to_split_into=2,
             removal_opacity_threshold=0.005,
             final_removal_opacity_threshold=0.005,
-            reset_opacities_every=3000, # Doesn't consider iter 0
+            reset_opacities_every=3000,  # Doesn't consider iter 0
         ),
     ),
     viz=dict(
-        render_mode='color', # ['color', 'depth' or 'centers']
-        offset_first_viz_cam=True, # Offsets the view camera back by 0.5 units along the view direction (For Final Recon Viz)
-        show_sil=False, # Show Silhouette instead of RGB
-        visualize_cams=True, # Visualize Camera Frustums and Trajectory
-        viz_w=600, viz_h=340,
-        viz_near=0.01, viz_far=100.0,
+        render_mode='color',  # ['color', 'depth' or 'centers']
+        # Offset final-recon view camera back by 0.5 units.
+        offset_first_viz_cam=True,
+        show_sil=False,  # Show Silhouette instead of RGB
+        visualize_cams=True,  # Visualize Camera Frustums and Trajectory
+        viz_w=600,
+        viz_h=340,
+        viz_near=0.01,
+        viz_far=100.0,
         view_scale=2,
-        viz_fps=5, # FPS for Online Recon Viz
-        enter_interactive_post_online=True, # Enter Interactive Mode after Online Recon Viz
+        viz_fps=5,  # FPS for Online Recon Viz
+        # Enter interactive mode after online recon viz.
+        enter_interactive_post_online=True,
     ),
 )

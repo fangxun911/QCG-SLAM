@@ -47,17 +47,21 @@ class Record3DDataset(GradSLAMDataset):
         )
 
     def get_filepaths(self):
-        color_paths = natsorted(glob.glob(os.path.join(self.input_folder, "rgb", "*.png")))
-        depth_paths = natsorted(glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
+        color_paths = natsorted(
+            glob.glob(os.path.join(self.input_folder, "rgb", "*.png")))
+        depth_paths = natsorted(
+            glob.glob(os.path.join(self.input_folder, "depth", "*.png")))
         embedding_paths = None
         if self.load_embeddings:
-            embedding_paths = natsorted(glob.glob(f"{self.input_folder}/{self.embedding_dir}/*.pt"))
+            embedding_paths = natsorted(
+                glob.glob(f"{self.input_folder}/{self.embedding_dir}/*.pt"))
         return color_paths, depth_paths, embedding_paths
 
     def load_poses(self):
         posefiles = natsorted(glob.glob(os.path.join(self.pose_path, "*.npy")))
         poses = []
-        P = torch.tensor([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]]).float()
+        P = torch.tensor([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0],
+                          [0, 0, 0, 1]]).float()
         for posefile in posefiles:
             c2w = torch.from_numpy(np.load(posefile)).float()
             _R = c2w[:3, :3]

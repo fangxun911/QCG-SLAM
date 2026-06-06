@@ -11,6 +11,7 @@ from .basedataset import GradSLAMDataset
 
 
 class ScannetDataset(GradSLAMDataset):
+
     def __init__(
         self,
         config_dict,
@@ -46,7 +47,8 @@ class ScannetDataset(GradSLAMDataset):
         depth_paths = natsorted(glob.glob(f"{self.input_folder}/depth/*.png"))
         embedding_paths = None
         if self.load_embeddings:
-            embedding_paths = natsorted(glob.glob(f"{self.input_folder}/{self.embedding_dir}/*.pt"))
+            embedding_paths = natsorted(
+                glob.glob(f"{self.input_folder}/{self.embedding_dir}/*.pt"))
         return color_paths, depth_paths, embedding_paths
 
     def load_poses(self):
@@ -61,4 +63,3 @@ class ScannetDataset(GradSLAMDataset):
         print(embedding_file_path)
         embedding = torch.load(embedding_file_path, map_location="cpu")
         return embedding.permute(0, 2, 3, 1)  # (1, H, W, embedding_dim)
-    

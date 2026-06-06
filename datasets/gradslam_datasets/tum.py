@@ -10,7 +10,9 @@ from natsort import natsorted
 
 from .basedataset import GradSLAMDataset
 
+
 class TUMDataset(GradSLAMDataset):
+
     def __init__(
         self,
         config_dict,
@@ -43,11 +45,17 @@ class TUMDataset(GradSLAMDataset):
 
     def parse_list(self, filepath, skiprows=0):
         """ read list data """
-        data = np.loadtxt(filepath, delimiter=' ',
-                          dtype=np.unicode_, skiprows=skiprows)
+        data = np.loadtxt(filepath,
+                          delimiter=' ',
+                          dtype=np.unicode_,
+                          skiprows=skiprows)
         return data
 
-    def associate_frames(self, tstamp_image, tstamp_depth, tstamp_pose, max_dt=0.08):
+    def associate_frames(self,
+                         tstamp_image,
+                         tstamp_depth,
+                         tstamp_pose,
+                         max_dt=0.08):
         """ pair images, depths, and poses """
         associations = []
         for i, t in enumerate(tstamp_image):
@@ -95,8 +103,8 @@ class TUMDataset(GradSLAMDataset):
         tstamp_image = image_data[:, 0].astype(np.float64)
         tstamp_depth = depth_data[:, 0].astype(np.float64)
         tstamp_pose = pose_data[:, 0].astype(np.float64)
-        associations = self.associate_frames(
-            tstamp_image, tstamp_depth, tstamp_pose)
+        associations = self.associate_frames(tstamp_image, tstamp_depth,
+                                             tstamp_pose)
 
         indicies = [0]
         for i in range(1, len(associations)):
@@ -114,9 +122,9 @@ class TUMDataset(GradSLAMDataset):
         embedding_paths = None
 
         return color_paths, depth_paths, embedding_paths
-    
+
     def load_poses(self):
-        
+
         frame_rate = 32
         """ read video data in tum-rgbd format """
         if os.path.isfile(os.path.join(self.input_folder, 'groundtruth.txt')):
@@ -135,8 +143,8 @@ class TUMDataset(GradSLAMDataset):
         tstamp_image = image_data[:, 0].astype(np.float64)
         tstamp_depth = depth_data[:, 0].astype(np.float64)
         tstamp_pose = pose_data[:, 0].astype(np.float64)
-        associations = self.associate_frames(
-            tstamp_image, tstamp_depth, tstamp_pose)
+        associations = self.associate_frames(tstamp_image, tstamp_depth,
+                                             tstamp_pose)
 
         indicies = [0]
         for i in range(1, len(associations)):
@@ -156,8 +164,7 @@ class TUMDataset(GradSLAMDataset):
             poses += [c2w]
 
         return poses
-    
+
     def read_embedding_from_file(self, embedding_file_path):
         embedding = torch.load(embedding_file_path, map_location="cpu")
         return embedding.permute(0, 2, 3, 1)
-    

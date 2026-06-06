@@ -17,13 +17,14 @@ __all__ = [
 
 
 def normalize_image(rgb: Union[torch.Tensor, np.ndarray]):
-    r"""Normalizes RGB image values from :math:`[0, 255]` range to :math:`[0, 1]` range.
+    r"""Normalize RGB image values from :math:`[0, 255]` to `[0, 1]`.
 
     Args:
         rgb (torch.Tensor or numpy.ndarray): RGB image in range :math:`[0, 255]`
 
     Returns:
-        torch.Tensor or numpy.ndarray: Normalized RGB image in range :math:`[0, 1]`
+        torch.Tensor or numpy.ndarray: Normalized RGB image in range
+            :math:`[0, 1]`.
 
     Shape:
         - rgb: :math:`(*)` (any shape)
@@ -38,11 +39,11 @@ def normalize_image(rgb: Union[torch.Tensor, np.ndarray]):
 
 
 def channels_first(rgb: Union[torch.Tensor, np.ndarray]):
-    r"""Converts from channels last representation :math:`(*, H, W, C)` to channels first representation
-    :math:`(*, C, H, W)`
+    r"""Convert channels-last tensors to channels-first tensors.
 
     Args:
-        rgb (torch.Tensor or numpy.ndarray): :math:`(*, H, W, C)` ordering `(*, height, width, channels)`
+        rgb (torch.Tensor or numpy.ndarray): :math:`(*, H, W, C)` ordering
+            `(*, height, width, channels)`.
 
     Returns:
         torch.Tensor or numpy.ndarray: :math:`(*, C, H, W)` ordering
@@ -56,13 +57,15 @@ def channels_first(rgb: Union[torch.Tensor, np.ndarray]):
 
     if rgb.ndim < 3:
         raise ValueError(
-            "Input rgb must contain atleast 3 dims, but had {} dims.".format(rgb.ndim)
-        )
+            "Input rgb must contain atleast 3 dims, but had {} dims.".format(
+                rgb.ndim))
     if rgb.shape[-3] < rgb.shape[-1]:
-        msg = "Are you sure that the input is correct? Number of channels exceeds height of image: %r > %r"
+        msg = ("Are you sure that the input is correct? Number of channels "
+               "exceeds height of image: %r > %r")
         warnings.warn(msg % (rgb.shape[-1], rgb.shape[-3]))
     ordering = list(range(rgb.ndim))
-    ordering[-2], ordering[-1], ordering[-3] = ordering[-3], ordering[-2], ordering[-1]
+    ordering[-2], ordering[-1], ordering[-3] = ordering[-3], ordering[
+        -2], ordering[-1]
 
     if isinstance(rgb, np.ndarray):
         return np.ascontiguousarray(rgb.transpose(*ordering))
@@ -76,21 +79,25 @@ def scale_intrinsics(
     w_ratio: Union[float, int],
 ):
     r"""Scales the intrinsics appropriately for resized frames where
-    :math:`h_\text{ratio} = h_\text{new} / h_\text{old}` and :math:`w_\text{ratio} = w_\text{new} / w_\text{old}`
+    :math:`h_\text{ratio} = h_\text{new} / h_\text{old}` and
+    :math:`w_\text{ratio} = w_\text{new} / w_\text{old}`.
 
     Args:
-        intrinsics (numpy.ndarray or torch.Tensor): Intrinsics matrix of original frame
-        h_ratio (float or int): Ratio of new frame's height to old frame's height
+        intrinsics (numpy.ndarray or torch.Tensor): Intrinsics matrix of the
+            original frame.
+        h_ratio (float or int): Ratio of the new height to the old height.
             :math:`h_\text{ratio} = h_\text{new} / h_\text{old}`
         w_ratio (float or int): Ratio of new frame's width to old frame's width
             :math:`w_\text{ratio} = w_\text{new} / w_\text{old}`
 
     Returns:
-        numpy.ndarray or torch.Tensor: Intrinsics matrix scaled approprately for new frame size
+        numpy.ndarray or torch.Tensor: Intrinsics matrix scaled appropriately
+            for the new frame size.
 
     Shape:
         - intrinsics: :math:`(*, 3, 3)` or :math:`(*, 4, 4)`
-        - Output: Matches `intrinsics` shape, :math:`(*, 3, 3)` or :math:`(*, 4, 4)`
+        - Output: Matches `intrinsics` shape, :math:`(*, 3, 3)` or
+          :math:`(*, 4, 4)`
 
     """
     if isinstance(intrinsics, np.ndarray):
@@ -98,17 +105,16 @@ def scale_intrinsics(
     elif torch.is_tensor(intrinsics):
         scaled_intrinsics = intrinsics.to(torch.float).clone()
     else:
-        raise TypeError("Unsupported input intrinsics type {}".format(type(intrinsics)))
+        raise TypeError("Unsupported input intrinsics type {}".format(
+            type(intrinsics)))
     if not (intrinsics.shape[-2:] == (3, 3) or intrinsics.shape[-2:] == (4, 4)):
         raise ValueError(
-            "intrinsics must have shape (*, 3, 3) or (*, 4, 4), but had shape {} instead".format(
-                intrinsics.shape
-            )
-        )
-    if (intrinsics[..., -1, -1] != 1).any() or (intrinsics[..., 2, 2] != 1).any():
-        warnings.warn(
-            "Incorrect intrinsics: intrinsics[..., -1, -1] and intrinsics[..., 2, 2] should be 1."
-        )
+            "intrinsics must have shape (*, 3, 3) or (*, 4, 4), but had "
+            "shape {} instead".format(intrinsics.shape))
+    if (intrinsics[..., -1, -1] != 1).any() or (intrinsics[..., 2, 2] !=
+                                                1).any():
+        warnings.warn("Incorrect intrinsics: intrinsics[..., -1, -1] and "
+                      "intrinsics[..., 2, 2] should be 1.")
 
     scaled_intrinsics[..., 0, 0] *= w_ratio  # fx
     scaled_intrinsics[..., 1, 1] *= h_ratio  # fy
@@ -117,12 +123,15 @@ def scale_intrinsics(
     return scaled_intrinsics
 
 
-def pointquaternion_to_homogeneous(
-    pointquaternions: Union[np.ndarray, torch.Tensor], eps: float = 1e-12
-):
-    r"""Converts 3D point and unit quaternions :math:`(t_x, t_y, t_z, q_x, q_y, q_z, q_w)` to
-    homogeneous transformations [R | t] where :math:`R` denotes the :math:`(3, 3)` rotation matrix and :math:`T`
-    denotes the :math:`(3, 1)` translation matrix:
+def pointquaternion_to_homogeneous(pointquaternions: Union[np.ndarray,
+                                                           torch.Tensor],
+                                   eps: float = 1e-12):
+    r"""Convert 3D points and unit quaternions to homogeneous transforms.
+
+    The input format is :math:`(t_x, t_y, t_z, q_x, q_y, q_z, q_w)`.
+    The output transform is [R | t], where :math:`R` is the
+    :math:`(3, 3)` rotation matrix and :math:`T` is the
+    :math:`(3, 1)` translation matrix:
 
     .. math::
 
@@ -134,8 +143,9 @@ def pointquaternion_to_homogeneous(
         \end{array}\right]
 
     Args:
-        pointquaternions (numpy.ndarray or torch.Tensor): 3D point positions and unit quaternions
-            :math:`(tx, ty, tz, qx, qy, qz, qw)` where :math:`(tx, ty, tz)` is the 3D position and
+        pointquaternions (numpy.ndarray or torch.Tensor): 3D point positions
+            and unit quaternions :math:`(tx, ty, tz, qx, qy, qz, qw)`.
+            Here :math:`(tx, ty, tz)` is the 3D position and
             :math:`(qx, qy, qz, qw)` is the unit quaternion.
         eps (float): Small value, to avoid division by zero. Default: 1e-12
 
@@ -147,22 +157,18 @@ def pointquaternion_to_homogeneous(
         - Output: :math:`(*, 4, 4)`
 
     """
-    if not (
-        isinstance(pointquaternions, np.ndarray) or torch.is_tensor(pointquaternions)
-    ):
-        raise TypeError(
-            '"pointquaternions" must be of type "np.ndarray" or "torch.Tensor". Got {0}'.format(
-                type(pointquaternions)
-            )
-        )
+    if not (isinstance(pointquaternions, np.ndarray) or
+            torch.is_tensor(pointquaternions)):
+        raise TypeError('"pointquaternions" must be of type "np.ndarray" or '
+                        '"torch.Tensor". Got {0}'.format(
+                            type(pointquaternions)))
     if not isinstance(eps, float):
-        raise TypeError('"eps" must be of type "float". Got {0}.'.format(type(eps)))
+        raise TypeError('"eps" must be of type "float". Got {0}.'.format(
+            type(eps)))
     if pointquaternions.shape[-1] != 7:
         raise ValueError(
             '"pointquaternions" must be of shape (*, 7). Got {0}.'.format(
-                pointquaternions.shape
-            )
-        )
+                pointquaternions.shape))
 
     output_shape = (*pointquaternions.shape[:-1], 4, 4)
     if isinstance(pointquaternions, np.ndarray):
@@ -172,16 +178,13 @@ def pointquaternion_to_homogeneous(
     else:
         t = pointquaternions[..., :3].float()
         q = pointquaternions[..., 3:7].float()
-        transform = torch.zeros(
-            output_shape, dtype=torch.float, device=pointquaternions.device
-        )
+        transform = torch.zeros(output_shape,
+                                dtype=torch.float,
+                                device=pointquaternions.device)
 
-    q_norm = (0.5 * (q ** 2).sum(-1)[..., None]) ** 0.5
-    q /= (
-        torch.max(q_norm, torch.tensor(eps))
-        if torch.is_tensor(q_norm)
-        else np.maximum(q_norm, eps)
-    )
+    q_norm = (0.5 * (q**2).sum(-1)[..., None])**0.5
+    q /= (torch.max(q_norm, torch.tensor(eps))
+          if torch.is_tensor(q_norm) else np.maximum(q_norm, eps))
 
     if isinstance(q, np.ndarray):
         q = np.matmul(q[..., None], q[..., None, :])
@@ -216,18 +219,19 @@ def pointquaternion_to_homogeneous(
 
 
 def poses_to_transforms(poses: Union[np.ndarray, List[np.ndarray]]):
-    r"""Converts poses to transformations w.r.t. the first frame in the sequence having identity pose
+    r"""Convert poses to transforms relative to the first frame.
 
     Args:
-        poses (numpy.ndarray or list of numpy.ndarray): Sequence of poses in `numpy.ndarray` format.
+        poses (numpy.ndarray or list of numpy.ndarray): Sequence of poses in
+            `numpy.ndarray` format.
 
     Returns:
-        numpy.ndarray or list of numpy.ndarray: Sequence of frame to frame transformations where initial
-            frame is transformed to have identity pose.
+        numpy.ndarray or list of numpy.ndarray: Sequence of frame-to-frame
+            transformations where the initial frame has identity pose.
 
     Shape:
-        - poses: Could be `numpy.ndarray` of shape :math:`(N, 4, 4)`, or list of `numpy.ndarray`s of shape
-          :math:`(4, 4)`
+        - poses: Could be `numpy.ndarray` of shape :math:`(N, 4, 4)`, or list
+          of `numpy.ndarray`s of shape :math:`(4, 4)`.
         - Output: Of same shape as input `poses`
     """
     transformations = copy.deepcopy(poses)
@@ -240,12 +244,13 @@ def poses_to_transforms(poses: Union[np.ndarray, List[np.ndarray]]):
 
 
 def create_label_image(prediction: np.ndarray, color_palette: OrderedDict):
-    r"""Creates a label image, given a network prediction (each pixel contains class index) and a color palette.
+    r"""Create a label image from a class-index prediction and color palette.
 
     Args:
-        prediction (numpy.ndarray): Predicted image where each pixel contains an integer,
-            corresponding to its class label.
-        color_palette (OrderedDict): Contains RGB colors (`uint8`) for each class.
+        prediction (numpy.ndarray): Predicted image where each pixel contains
+            an integer corresponding to its class label.
+        color_palette (OrderedDict): Contains RGB colors (`uint8`) for each
+            class.
 
     Returns:
         numpy.ndarray: Label image with the given color palette
@@ -255,9 +260,8 @@ def create_label_image(prediction: np.ndarray, color_palette: OrderedDict):
         - Output: :math:`(H, W)`
     """
 
-    label_image = np.zeros(
-        (prediction.shape[0], prediction.shape[1], 3), dtype=np.uint8
-    )
+    label_image = np.zeros((prediction.shape[0], prediction.shape[1], 3),
+                           dtype=np.uint8)
     for idx, color in enumerate(color_palette):
         label_image[prediction == idx] = color
     return label_image

@@ -1,3 +1,17 @@
+from utils.eval_helpers import eval, eval_nvs, eval_rendering_speed
+from utils.common_utils import seed_everything
+from datasets.gradslam_datasets import (load_dataset_config, ICLDataset,
+                                        ReplicaDataset, ReplicaV2Dataset,
+                                        AzureKinectDataset, ScannetDataset,
+                                        Ai2thorDataset, Record3DDataset,
+                                        RealsenseDataset, TUMDataset,
+                                        ScannetPPDataset, NeRFCaptureDataset)
+import wandb
+from tqdm import tqdm
+import torch
+import numpy as np
+import cv2
+import matplotlib.pyplot as plt
 import argparse
 import os
 import random
@@ -12,19 +26,6 @@ sys.path.insert(0, _BASE_DIR)
 print("System Paths:")
 for p in sys.path:
     print(p)
-
-import matplotlib.pyplot as plt
-import cv2
-import numpy as np
-import torch
-from tqdm import tqdm
-import wandb
-
-from datasets.gradslam_datasets import (load_dataset_config, ICLDataset, ReplicaDataset, ReplicaV2Dataset, AzureKinectDataset,
-                                        ScannetDataset, Ai2thorDataset, Record3DDataset, RealsenseDataset, TUMDataset,
-                                        ScannetPPDataset, NeRFCaptureDataset)
-from utils.common_utils import seed_everything
-from utils.eval_helpers import eval, eval_nvs, eval_rendering_speed
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
@@ -56,20 +57,22 @@ def get_dataset(config_dict, basedir, sequence, **kwargs):
 
 def load_scene_data(scene_path):
     params = dict(np.load(scene_path, allow_pickle=True))
-    params = {k: torch.tensor(params[k]).cuda().float().requires_grad_(True) for k in params.keys()}
+    params = {
+        k: torch.tensor(params[k]).cuda().float().requires_grad_(True)
+        for k in params.keys()
+    }
     return params
 
 
-if __name__=="__main__":
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("experiment", type=str, help="Path to experiment file")
 
     args = parser.parse_args()
 
-    experiment = SourceFileLoader(
-        os.path.basename(args.experiment), args.experiment
-    ).load_module()
+    experiment = SourceFileLoader(os.path.basename(args.experiment),
+                                  args.experiment).load_module()
 
     config = experiment.config
 
@@ -78,9 +81,8 @@ if __name__=="__main__":
     device = torch.device(config["primary_device"])
 
     # Create Results Directory and Copy Config
-    results_dir = os.path.join(
-        experiment.config["workdir"], experiment.config["run_name"]
-    )
+    results_dir = os.path.join(experiment.config["workdir"],
+                               experiment.config["run_name"])
     # if not experiment.config['load_checkpoint']:
     #     os.makedirs(results_dir, exist_ok=True)
     #     shutil.copy(args.experiment, os.path.join(results_dir, "config.py"))
@@ -92,7 +94,8 @@ if __name__=="__main__":
         gradslam_data_cfg = {}
         gradslam_data_cfg["dataset_name"] = dataset_config["dataset_name"]
     else:
-        gradslam_data_cfg = load_dataset_config(dataset_config["gradslam_data_cfg"])
+        gradslam_data_cfg = load_dataset_config(
+            dataset_config["gradslam_data_cfg"])
     if "ignore_bad" not in dataset_config:
         dataset_config["ignore_bad"] = False
     if "use_train_split" not in dataset_config:
@@ -117,7 +120,8 @@ if __name__=="__main__":
         num_frames = len(dataset)
 
     # scene_path = config['scene_path']
-    scene_path = os.path.join(config["workdir"], config["run_name"], 'params.npz')
+    scene_path = os.path.join(config["workdir"], config["run_name"],
+                              'params.npz')
     params = load_scene_data(scene_path)
 
     # if dataset_config['use_train_split']:
@@ -126,7 +130,7 @@ if __name__=="__main__":
     # else:
     #     eval_dir = os.path.join(results_dir, "eval_nvs")
     #     wandb_name = config['wandb']['name'] + "_NVS_Split"
-    
+
     # # Init WandB
     # if config['use_wandb']:
     #     wandb_time_step = 0
@@ -141,4 +145,3 @@ if __name__=="__main__":
     # Evaluate Final Parameters
     with torch.no_grad():
         print(1 / eval_rendering_speed(dataset, params, num_frames), " FPS")
-

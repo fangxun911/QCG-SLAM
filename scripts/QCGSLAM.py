@@ -1,5 +1,22 @@
 """Runs QCG-SLAM RGB-D Gaussian SLAM training and evaluation."""
 
+from diff_gaussian_rasterization import GaussianRasterizer as Renderer
+from utils.slam_external import (calc_ssim, build_rotation, prune_gaussians,
+                                 densify)
+from utils.slam_helpers import (transformed_params2rendervar,
+                                transformed_params2depthplussilhouette,
+                                transform_to_frame, l1_loss_v1,
+                                matrix_to_quaternion)
+from utils.recon_helpers import setup_camera
+from utils.eval_helpers import report_loss, report_progress
+from utils.eval_helpers import eval as eval_slam
+from utils.common_utils import seed_everything, save_params_ckpt, save_params
+from datasets.gradslam_datasets import (load_dataset_config, ICLDataset,
+                                        ReplicaDataset, ReplicaV2Dataset,
+                                        AzureKinectDataset, ScannetDataset,
+                                        Ai2thorDataset, Record3DDataset,
+                                        RealsenseDataset, TUMDataset,
+                                        ScannetPPDataset, NeRFCaptureDataset)
 import argparse
 import os
 import shutil
@@ -26,27 +43,11 @@ for p in sys.path:
 
 setproctitle.setproctitle("QCG-SLAM")
 
-from datasets.gradslam_datasets import (load_dataset_config, ICLDataset,
-                                        ReplicaDataset, ReplicaV2Dataset,
-                                        AzureKinectDataset, ScannetDataset,
-                                        Ai2thorDataset, Record3DDataset,
-                                        RealsenseDataset, TUMDataset,
-                                        ScannetPPDataset, NeRFCaptureDataset)
-from utils.common_utils import seed_everything, save_params_ckpt, save_params
-from utils.eval_helpers import eval as eval_slam
-from utils.eval_helpers import report_loss, report_progress
 # from utils.keyframe_selection import keyframe_selection_overlap
-from utils.recon_helpers import setup_camera
-from utils.slam_helpers import (transformed_params2rendervar,
-                                transformed_params2depthplussilhouette,
-                                transform_to_frame, l1_loss_v1,
-                                matrix_to_quaternion)
-from utils.slam_external import calc_ssim, build_rotation, prune_gaussians, densify
-
-from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 
 
 def get_dataset(config_dict, basedir, sequence, **kwargs):
+    """Create the dataset object configured for the current sequence."""
     if config_dict["dataset_name"].lower() in ["icl"]:
         return ICLDataset(config_dict, basedir, sequence, **kwargs)
     elif config_dict["dataset_name"].lower() in ["replica"]:
@@ -85,6 +86,7 @@ def get_quadtree_pointcloud(color,
                             time_idx=None,
                             scene_name=None,
                             params=None):
+    """Build a colored point cloud from quadtree leaf pixels."""
     with torch.no_grad():
         cx = intrinsics[0][2]
         cy = intrinsics[1][2]
@@ -120,7 +122,8 @@ def get_quadtree_pointcloud(color,
         else:
             pts = pts_cam
 
-        # Compute mean squared distance for initializing the scale of the Gaussians
+        # Compute mean squared distance for initializing the scale of the
+        # Gaussians
         if compute_mean_sq_dist:
             if mean_sq_dist_method == "projective":
                 # Projective Geometry (this is fast, farther -> larger radius)
@@ -133,7 +136,8 @@ def get_quadtree_pointcloud(color,
                         (quadtree_tensor[:, 3] -
                          quadtree_tensor[:, 1])**2).detach()
                     node_radius = node_duijiaoxian * 0.5
-                    # node_radius = torch.maximum(node_radius, torch.ones_like(node_radius))
+                    # node_radius = torch.maximum(node_radius,
+                    # torch.ones_like(node_radius))
                     scale_gaussian = scale_gaussian * node_radius
                     mean3_sq_dist = scale_gaussian**2
                     if mask is not None:
@@ -149,13 +153,16 @@ def get_quadtree_pointcloud(color,
                     # 这里的 scale_gaussian_tree 是四叉树叶节点的半径r
                     scale_gaussian_tree = scale_gaussian * node_radius
                     # 下面考虑最近邻距离
-                    # k = min(params['log_scales'].shape[0], int(2 * 10 ** 10 / pts.shape[0])) # 没有那么多算力处理这么多点，所以取后k个点
-                    # old_radius = torch.exp(params['log_scales'][-k:].detach()).max(dim=1).values
+                    # k = min(params['log_scales'].shape[0], int(2 * 10 ** 10 /
+                    # pts.shape[0])) # 没有那么多算力处理这么多点，所以取后k个点
+                    # old_radius = torch.exp(
+                    #     params['log_scales'][-k:].detach()).max(dim=1).values
                     # old_points = params['means3D'][-k:].detach()
                     if mask is not None:
                         mask = mask[y_grid, x_grid]
                         new_points = pts[mask].detach()
-                        # print("new quadtree points: ", new_points.shape[0], "~~~~~\n")
+                        # print("new quadtree points: ", new_points.shape[0],
+                        # "~~~~~\n")
                         if new_points.shape[0] == 0:
                             return new_points, scale_gaussian**2
                         k = min(
@@ -166,7 +173,9 @@ def get_quadtree_pointcloud(color,
                             params['log_scales'][-k:].detach()).max(
                                 dim=1).values
                         old_points = params['means3D'][-k:].detach()
-                        # torch.save({"new_points": new_points, "old_points": old_points, "old_radius": old_radius}, "cal_distance.1122.pt")
+                        # torch.save({"new_points": new_points, "old_points":
+                        # old_points, "old_radius": old_radius},
+                        # "cal_distance.1122.pt")
                         distances = torch.cdist(new_points, old_points)
                         scale_gaussian_tree_mask = scale_gaussian_tree[
                             mask].detach()
@@ -181,7 +190,8 @@ def get_quadtree_pointcloud(color,
                         torch.minimum(scale_gaussian_tree_mask,
                                       neighbor_distance), scale_gaussian_mask)
                     mean3_sq_dist = scale_gaussian**2
-                    del distances, closest_distance, neighbor_distance, quadtree_tensor
+                    del distances, closest_distance, neighbor_distance
+                    del quadtree_tensor
                     torch.cuda.empty_cache()
 
             else:
@@ -189,7 +199,8 @@ def get_quadtree_pointcloud(color,
                     f"Unknown mean_sq_dist_method {mean_sq_dist_method}")
 
         # Colorize point cloud
-        # cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
+        # cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) ->
+        # (H, W, C) -> (H * W, C)
         cols = color[:, y_grid, x_grid]
         # 给点云上色，后3列为rgb值
         point_cld = torch.cat((pts, torch.transpose(cols, 0, 1)), -1)
@@ -216,6 +227,7 @@ def get_pointcloud(color,
                    mask=None,
                    compute_mean_sq_dist=False,
                    mean_sq_dist_method="projective"):
+    """Build a colored point cloud from dense RGB-D pixels."""
     width, height = color.shape[2], color.shape[1]
     cx = intrinsics[0][2]
     cy = intrinsics[1][2]
@@ -275,11 +287,13 @@ def get_pointcloud(color,
 # 初始化第一帧，得到params和variables
 def initialize_params(init_pt_cld, num_frames, mean3_sq_dist,
                       gaussian_distribution):
+    """Initialize Gaussian and camera parameters for optimization."""
     num_pts = init_pt_cld.shape[0]
     means3D = init_pt_cld[:, :3]  # [num_gaussians, 3]
     # 原始3D高斯是R S S^T R^T，现在改成 r，那么 R = 单位值，S = log(sqrt(r ** 2))
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
-    # logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float, device=device)
+    # logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float,
+    # device=device)
     logit_opacities = torch.ones(
         (num_pts, 1), dtype=torch.float, device=device) * 2.1
     if gaussian_distribution == "isotropic":
@@ -299,7 +313,8 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist,
         'log_scales': log_scales,
     }
 
-    # Initialize a single gaussian trajectory to model the camera poses relative to the first frame
+    # Initialize a single gaussian trajectory to model the camera poses relative
+    # to the first frame
     # 将第一帧的相机位姿设置为单位值
     cam_rots = np.tile([1, 0, 0, 0], (1, 1))
     cam_rots = np.tile(cam_rots[:, :, None], (1, 1, num_frames))
@@ -332,6 +347,7 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist,
 
 
 def initialize_optimizer(params, lrs_dict, tracking):
+    """Create the Adam optimizer for tracking or mapping parameters."""
     lrs = lrs_dict
     param_groups = [{
         'params': [v],
@@ -351,6 +367,7 @@ def initialize_first_timestep(dataset,
                               densify_dataset=None,
                               gaussian_distribution=None,
                               scene_name=None):
+    """Initialize cameras, point cloud, and parameters from the first frame."""
     # Get RGB-D Data & Camera Parameters
     # 这里的pose是一个4x4矩阵
     color, depth, quadtree, intrinsics, pose = dataset[0]
@@ -401,12 +418,14 @@ def initialize_first_timestep(dataset,
     params, variables = initialize_params(init_pt_cld, num_frames,
                                           mean3_sq_dist, gaussian_distribution)
 
-    # Initialize an estimate of scene radius for Gaussian-Splatting Densification
+    # Initialize an estimate of scene radius for Gaussian-Splatting
+    # Densification
     # replica 里的 scene_radius_depth_ratio = 3
     variables['scene_radius'] = torch.max(depth) / scene_radius_depth_ratio
 
     if densify_dataset is not None:
-        return params, variables, intrinsics, w2c, cam, densify_intrinsics, densify_cam
+        return (params, variables, intrinsics, w2c, cam, densify_intrinsics,
+                densify_cam)
     else:
         return params, variables, intrinsics, w2c, cam
 
@@ -426,6 +445,7 @@ def get_loss(params,
              plot_dir=None,
              visualize_tracking_loss=False,
              tracking_iteration=None):
+    """Compute the weighted RGB-D SLAM loss for tracking or mapping."""
     # Initialize Loss Dictionary
     losses = {}
 
@@ -437,7 +457,8 @@ def get_loss(params,
                                                    camera_grad=True)
     elif mapping:
         if do_ba:
-            # Get current frame Gaussians, where both camera pose and Gaussians get gradient
+            # Get current frame Gaussians, where both camera pose and Gaussians
+            # get gradient
             transformed_gaussians = transform_to_frame(params,
                                                        iter_time_idx,
                                                        gaussians_grad=True,
@@ -560,18 +581,23 @@ def get_loss(params,
         plot_img = cv2.imread(os.path.join(plot_dir, f"tmp.png"))
         cv2.imshow('Diff Images', plot_img)
         cv2.waitKey(1)
-        ## Save Tracking Loss Viz
-        # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" % iter_time_idx)
+        # Save Tracking Loss Viz
+        # save_plot_dir = os.path.join(plot_dir, f"tracking_%04d" %
+        # iter_time_idx)
         # os.makedirs(save_plot_dir, exist_ok=True)
-        # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" % tracking_iteration), bbox_inches='tight')
+        # plt.savefig(os.path.join(save_plot_dir, f"%04d.png" %
+        # tracking_iteration), bbox_inches='tight')
         # plt.close()
 
     weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
     # torchvision.utils.save_image(depth / 255, 'rendered_im.png'%loss)
-    # torchvision.utils.save_image((silhouette>0.5).float(), 'fx/quad/sil<0.5/sil_%.4f.png'%loss)
-    # torchvision.utils.save_image((torch.abs(curr_data['depth'] - depth) < 0.1).float(), 'fx/quad/depth_error/depth_error_%.4f.png'%loss)
-    # torchvision.utils.save_image((torch.abs(curr_data['im'] - im).mean(dim=0) < 0.1).float(), 'fx/quad/RGB_error/rendered_error_%.4f.png'%loss)
+    # torchvision.utils.save_image((silhouette>0.5).float(),
+    # 'fx/quad/sil<0.5/sil_%.4f.png'%loss)
+    # torchvision.utils.save_image((torch.abs(curr_data['depth'] - depth) <
+    # 0.1).float(), 'fx/quad/depth_error/depth_error_%.4f.png'%loss)
+    # torchvision.utils.save_image((torch.abs(curr_data['im'] - im).mean(dim=0)
+    # < 0.1).float(), 'fx/quad/RGB_error/rendered_error_%.4f.png'%loss)
 
     seen = radius > 0  # 这里的 radius 是在渲染RGB时算出来的
     variables['max_2D_radius'][seen] = torch.max(
@@ -583,6 +609,7 @@ def get_loss(params,
 
 
 def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
+    """Initialize trainable parameters for newly added Gaussians."""
     num_pts = new_pt_cld.shape[0]
     means3D = new_pt_cld[:, :3]  # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
@@ -618,6 +645,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
 
 
 def initialize_finer_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
+    """Initialize trainable parameters for fine-level Gaussians."""
     num_pts = new_pt_cld.shape[0]
     means3D = new_pt_cld[:, :3]  # [num_gaussians, 3]
     unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
@@ -655,6 +683,7 @@ def initialize_finer_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
 def add_coarse_gaussians(params, variables, curr_data, sil_thres, time_idx,
                          mean_sq_dist_method, gaussian_distribution,
                          scene_name):
+    """Add coarse Gaussians for unobserved silhouette regions."""
     # Silhouette Rendering
     transformed_gaussians = transform_to_frame(params,
                                                time_idx,
@@ -672,10 +701,13 @@ def add_coarse_gaussians(params, variables, curr_data, sil_thres, time_idx,
     # gt_depth = curr_data['depth'][0, :, :]
     # render_depth = depth_sil[0, :, :]
     # depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
-    # non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 50*depth_error.median())
+    # non_presence_depth_mask = (render_depth > gt_depth) * (depth_error >
+    # 50*depth_error.median())
     # Determine non-presence mask
-    # non_presence_mask = non_presence_sil_mask | non_presence_depth_mask # silhouette低、深度不合理的像素的并集的mask
-    non_presence_mask = non_presence_sil_mask  # coarse densification 只填补没观察到的区域，深度差异大的地方在fine densification填补
+    # non_presence_mask = non_presence_sil_mask | non_presence_depth_mask #
+    # silhouette低、深度不合理的像素的并集的mask
+    # coarse densification 只填补没观察到的区域，深度差异大的地方在fine densification填补
+    non_presence_mask = non_presence_sil_mask
     # # Flatten mask
     # non_presence_mask = non_presence_mask.reshape(-1)
 
@@ -728,6 +760,7 @@ def add_coarse_gaussians(params, variables, curr_data, sil_thres, time_idx,
 
 def add_fine_gaussians(params, variables, curr_data, sil_thres, color_thres,
                        time_idx, mean_sq_dist_method, gaussian_distribution):
+    """Add fine Gaussians for color, depth, and silhouette residuals."""
     # Silhouette Rendering
     transformed_gaussians = transform_to_frame(params,
                                                time_idx,
@@ -752,7 +785,8 @@ def add_fine_gaussians(params, variables, curr_data, sil_thres, color_thres,
         depth_error > 50 * depth_error.median())
     non_presence_color_mask = (im_error > color_thres)
 
-    non_presence_mask = non_presence_color_mask | non_presence_depth_mask | non_presence_sil_mask
+    non_presence_mask = (non_presence_color_mask | non_presence_depth_mask |
+                         non_presence_sil_mask)
     # non_presence_mask = non_presence_depth_mask | non_presence_sil_mask
     # Flatten mask
     non_presence_mask = non_presence_mask.reshape(-1)
@@ -795,9 +829,11 @@ def add_fine_gaussians(params, variables, curr_data, sil_thres, color_thres,
 
 
 def initialize_camera_pose(params, curr_time_idx, forward_prop):
+    """Initialize the current camera pose estimate."""
     with torch.no_grad():
         if curr_time_idx > 1 and forward_prop:
-            # Initialize the camera pose for the current frame based on a constant velocity model
+            # Initialize the camera pose for the current frame based on a
+            # constant velocity model
             # Rotation
             prev_rot1 = F.normalize(
                 params['cam_unnorm_rots'][..., curr_time_idx - 1].detach())
@@ -823,6 +859,7 @@ def initialize_camera_pose(params, curr_time_idx, forward_prop):
 
 
 def convert_params_to_store(params):
+    """Detach parameters into tensors suitable for checkpoint storage."""
     params_to_store = {}
     for k, v in params.items():
         if isinstance(v, torch.Tensor):
@@ -833,6 +870,7 @@ def convert_params_to_store(params):
 
 
 def rgbd_slam(config: dict):
+    """Run the QCG-SLAM RGB-D tracking and mapping pipeline."""
     # Print Config
     print("Loading Config:")
     # replica 配置文件里没有 use_depth_loss_thres；scannetpp有，如果没达到thres，tracking轮数翻倍
@@ -892,8 +930,10 @@ def rgbd_slam(config: dict):
             "desired_image_width"]
         separate_densification_res = False
     else:
-        if dataset_config["densification_image_height"] != dataset_config["desired_image_height"] or \
-            dataset_config["densification_image_width"] != dataset_config["desired_image_width"]:
+        if (dataset_config["densification_image_height"] !=
+                dataset_config["desired_image_height"] or
+                dataset_config["densification_image_width"] !=
+                dataset_config["desired_image_width"]):
             separate_densification_res = True
         else:
             separate_densification_res = False
@@ -904,8 +944,10 @@ def rgbd_slam(config: dict):
             "desired_image_width"]
         separate_tracking_res = False
     else:
-        if dataset_config["tracking_image_height"] != dataset_config["desired_image_height"] or \
-            dataset_config["tracking_image_width"] != dataset_config["desired_image_width"]:
+        if (dataset_config["tracking_image_height"] !=
+                dataset_config["desired_image_height"] or
+                dataset_config["tracking_image_width"] !=
+                dataset_config["desired_image_width"]):
             separate_tracking_res = True
         else:
             separate_tracking_res = False
@@ -951,20 +993,23 @@ def rgbd_slam(config: dict):
         )
         # Initialize Parameters, Canonical & Densification Camera parameters
         params, variables, intrinsics, first_frame_w2c, cam, \
-            densify_intrinsics, densify_cam = initialize_first_timestep(dataset, num_frames,
-                                                                        config['scene_radius_depth_ratio'],
-                                                                        config['mean_sq_dist_method'],
-                                                                        densify_dataset=densify_dataset,
-                                                                        gaussian_distribution=config['gaussian_distribution'])
+            densify_intrinsics, densify_cam = initialize_first_timestep(
+                dataset,
+                num_frames,
+                config['scene_radius_depth_ratio'],
+                config['mean_sq_dist_method'],
+                densify_dataset=densify_dataset,
+                gaussian_distribution=config['gaussian_distribution'])
     else:
         # Initialize Parameters & Canoncial Camera parameters
-        params, variables, intrinsics, first_frame_w2c, cam = initialize_first_timestep(
-            dataset,
-            num_frames,
-            config['scene_radius_depth_ratio'],
-            config['mean_sq_dist_method'],
-            gaussian_distribution=config['gaussian_distribution'],
-            scene_name=config['data']['sequence'])
+        params, variables, intrinsics, first_frame_w2c, cam = (
+            initialize_first_timestep(
+                dataset,
+                num_frames,
+                config['scene_radius_depth_ratio'],
+                config['mean_sq_dist_method'],
+                gaussian_distribution=config['gaussian_distribution'],
+                scene_name=config['data']['sequence']))
 
     # Init separate dataloader for tracking if required
     if separate_tracking_res:
@@ -1249,8 +1294,9 @@ def rgbd_slam(config: dict):
         tracking_frame_time_sum += tracking_end_time - tracking_start_time
         tracking_frame_time_count += 1
 
-        if time_idx == 0 or (time_idx + 1) % config[
-                'report_global_progress_every'] == 0:  # 每 report_global_progress_every 帧报告一次
+        # 每 report_global_progress_every 帧报告一次
+        if time_idx == 0 or (time_idx +
+                             1) % config['report_global_progress_every'] == 0:
             try:
                 # Report Final Tracking Progress
                 progress_bar = tqdm(
@@ -1279,7 +1325,7 @@ def rgbd_slam(config: dict):
                             sil_thres=config['tracking']['sil_thres'],
                             tracking=True)
                 progress_bar.close()
-            except:
+            except BaseException:
                 ckpt_output_dir = os.path.join(config["workdir"],
                                                config["run_name"])
                 save_params_ckpt(params, ckpt_output_dir, time_idx)
@@ -1308,7 +1354,8 @@ def rgbd_slam(config: dict):
                 else:
                     densify_curr_data = curr_data
 
-                # Add new Gaussians to the scene based on the Silhouette在这里加一个bool位，判断是否将本帧视为关键帧
+                # Add new Gaussians to the scene based on the
+                # Silhouette在这里加一个bool位，判断是否将本帧视为关键帧
                 params, variables = add_coarse_gaussians(
                     params, variables, densify_curr_data,
                     config['mapping']['sil_thres'], time_idx,
@@ -1400,7 +1447,8 @@ def rgbd_slam(config: dict):
                                 "Mapping/step":
                                     wandb_mapping_step
                             })
-                    # Gaussian-Splatting's Gradient-based Densification 不用use_gaussian_splatting_densification
+                    # Gaussian-Splatting's Gradient-based Densification
+                    # 不用use_gaussian_splatting_densification
                     if config['mapping'][
                             'use_gaussian_splatting_densification']:
                         params, variables = densify(
@@ -1465,7 +1513,8 @@ def rgbd_slam(config: dict):
                                              tracking=False)
 
             # if fine_num_iters_mapping > 0:
-            #     progress_bar = tqdm(range(fine_num_iters_mapping), desc=f"Fine Mapping Time Step: {time_idx}")
+            # progress_bar = tqdm(range(fine_num_iters_mapping), desc=f"Fine
+            # Mapping Time Step: {time_idx}")
             if fine_num_iters_mapping > 0 and time_idx == 0:
                 fine_num_iters_mapping_1 = fine_num_iters_mapping + 100
                 progress_bar = tqdm(range(fine_num_iters_mapping_1),
@@ -1547,7 +1596,8 @@ def rgbd_slam(config: dict):
                                 "Mapping/step":
                                     wandb_mapping_step
                             })
-                    # Gaussian-Splatting's Gradient-based Densification 不用use_gaussian_splatting_densification
+                    # Gaussian-Splatting's Gradient-based Densification
+                    # 不用use_gaussian_splatting_densification
                     if config['mapping'][
                             'use_gaussian_splatting_densification']:
                         params, variables = densify(
@@ -1635,21 +1685,32 @@ def rgbd_slam(config: dict):
                                 mapping=True,
                                 online_time_idx=time_idx)
                     progress_bar.close()
-                except:
+                except BaseException:
                     ckpt_output_dir = os.path.join(config["workdir"],
                                                    config["run_name"])
                     save_params_ckpt(params, ckpt_output_dir, time_idx)
                     print('Failed to evaluate trajectory.')
 
-        # Add frame to keyframe list 增加关键帧（第一帧、距离上一个关键帧已经隔了keyframe_every帧、倒数第2帧）
-        # if ((time_idx == 0) or (not is_KeyFrame and (time_idx-keyframe_time_indices[-1]) % config['keyframe_every'] == 0) or \
-        #             (time_idx == num_frames-2) or is_KeyFrame) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
-        # if ((time_idx == 0) or (time_idx == num_frames-2) or is_KeyFrame) and \
-        #     (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
-        # if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
-        #             (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
-        if ((time_idx) % config['keyframe_every'] == 0) and \
-            (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
+        # Add frame to keyframe list
+        # 增加关键帧（第一帧、距离上一个关键帧已经隔了keyframe_every帧、倒数第2帧）
+        # if ((time_idx == 0) or (not is_KeyFrame and
+        # (time_idx-keyframe_time_indices[-1]) % config['keyframe_every'] == 0)
+        # or \
+        # (time_idx == num_frames-2) or is_KeyFrame) and (not
+        # torch.isinf(curr_gt_w2c[-1]).any()) and (not
+        # torch.isnan(curr_gt_w2c[-1]).any()):
+        # if ((time_idx == 0) or (time_idx == num_frames-2) or is_KeyFrame) and
+        # \
+        # (not torch.isinf(curr_gt_w2c[-1]).any()) and (not
+        # torch.isnan(curr_gt_w2c[-1]).any()):
+        # if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0)
+        # or \
+        # (time_idx == num_frames-2)) and (not
+        # torch.isinf(curr_gt_w2c[-1]).any()) and (not
+        # torch.isnan(curr_gt_w2c[-1]).any()):
+        if ((time_idx) % config['keyframe_every']
+                == 0) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (
+                    not torch.isnan(curr_gt_w2c[-1]).any()):
             with torch.no_grad():
                 # Get the current estimated rotation & translation
                 curr_cam_rot = F.normalize(
@@ -1746,7 +1807,8 @@ def rgbd_slam(config: dict):
         mapping_iter_time_count = 1
         mapping_frame_time_count = 1
     tracking_iter_time_avg = tracking_iter_time_sum / tracking_iter_time_count
-    tracking_frame_time_avg = tracking_frame_time_sum / tracking_frame_time_count
+    tracking_frame_time_avg = (tracking_frame_time_sum /
+                               tracking_frame_time_count)
     mapping_iter_time_avg = mapping_iter_time_sum / mapping_iter_time_count
     mapping_frame_time_avg = mapping_frame_time_sum / mapping_frame_time_count
     print(

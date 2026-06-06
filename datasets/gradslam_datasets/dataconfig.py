@@ -8,7 +8,8 @@ def load_dataset_config(path, default_path=None):
 
     Args:
         path (str): path to config file.
-        default_path (str, optional): whether to use default path. Defaults to None.
+        default_path (str, optional): Whether to use the default path.
+            Defaults to None.
 
     Returns:
         cfg (dict): config dict.

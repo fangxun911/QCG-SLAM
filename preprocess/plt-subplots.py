@@ -26,7 +26,12 @@ axs[1, 1].set_title("RGB LPIPS")
 axs[1, 1].set_xlabel("Time Step")
 axs[1, 1].set_ylabel("LPIPS")
 
-avg_psnr, avg_ssim, avg_lpips, avg_l1, ate_rmse = 31.35, 0.97, 0.12, 0.008, 0.004
-fig.suptitle("Average PSNR: {:.2f}, Average SSIM: {:.2f}, Average LPIPS: {:.2f}, Average Depth L1: {:.2f} cm, ATE RMSE: {:.2f} cm, ".format(avg_psnr, avg_ssim, avg_lpips, avg_l1*100, ate_rmse*100), fontsize=12)
+avg_psnr, avg_ssim, avg_lpips, avg_l1, ate_rmse = (31.35, 0.97, 0.12, 0.008,
+                                                   0.004)
+fig.suptitle(
+    "Average PSNR: {:.2f}, Average SSIM: {:.2f}, Average LPIPS: {:.2f}, "
+    "Average Depth L1: {:.2f} cm, ATE RMSE: {:.2f} cm, ".format(
+        avg_psnr, avg_ssim, avg_lpips, avg_l1 * 100, ate_rmse * 100),
+    fontsize=12)
 plt.savefig("Metrics.png", bbox_inches='tight')
 plt.close()

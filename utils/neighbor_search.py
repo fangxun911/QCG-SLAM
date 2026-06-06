@@ -21,7 +21,7 @@ def torch_3d_knn(pts, num_knn, method="l2"):
     index.add(pts)
     distances, indices = index.search(pts, num_knn)
     return distances, indices
-    
+
 
 def calculate_neighbors(params, variables, time_idx, num_knn=20):
     if time_idx is None:
