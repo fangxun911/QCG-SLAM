@@ -14,6 +14,45 @@ def prepare_config(config):
     # replica scannetpp配置文件里 gaussian_distribution = isotropic
     if "gaussian_distribution" not in config:
         config['gaussian_distribution'] = "isotropic"
+    surface_defaults = {
+        "normal_window": 5,
+        "fallback_normal_window": 3,
+        "depth_abs_thresh": 0.02,
+        "depth_rel_thresh": 0.02,
+        "min_plane_points": 6,
+        "max_planarity_ratio": 0.05,
+        "min_view_cos": 0.2,
+        "normal_scale_min_ratio": 0.05,
+        "normal_scale_max_ratio": 0.25,
+        "node_min_valid_fraction": 0.5,
+        "node_min_inlier_fraction": 0.8,
+        "geometry_batch_size": 32768,
+        "min_scale": 1e-6,
+    }
+    surface_defaults.update(config.get("surface_init", {}))
+    config["surface_init"] = surface_defaults
+    regularization_defaults = {
+        "enabled": False,
+        "min_normal_to_tangent_ratio": 0.05,
+        "max_normal_to_tangent_ratio": 0.25,
+        "max_normal_deviation_degrees": 15.0,
+        "thickness_weight": 0.1,
+        "normal_weight": 0.05,
+    }
+    regularization_defaults.update(config.get("surface_regularization", {}))
+    min_ratio = regularization_defaults["min_normal_to_tangent_ratio"]
+    max_ratio = regularization_defaults["max_normal_to_tangent_ratio"]
+    if not 0 < min_ratio <= max_ratio:
+        raise ValueError(
+            "surface_regularization ratios must satisfy 0 < min <= max")
+    max_deviation = regularization_defaults["max_normal_deviation_degrees"]
+    if not 0 < max_deviation <= 90:
+        raise ValueError(
+            "surface_regularization max normal deviation must be in (0, 90]")
+    if regularization_defaults["thickness_weight"] < 0 or \
+            regularization_defaults["normal_weight"] < 0:
+        raise ValueError("surface_regularization weights must be non-negative")
+    config["surface_regularization"] = regularization_defaults
     return config
 
 

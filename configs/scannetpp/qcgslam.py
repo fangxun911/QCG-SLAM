@@ -40,7 +40,7 @@ mapping_iters = coarse_mapping_iters + fine_mapping_iters
 
 group_name = "ScanNet++"
 now = datetime.datetime.now().strftime("%m%d%H%M")
-run_name = f"{scene_name}_{seed}"
+run_name = f"{scene_name}_{seed}_anisotropic"
 
 config = dict(
     workdir=f"./experiments/{group_name}",
@@ -49,16 +49,39 @@ config = dict(
     primary_device=primary_device,
     map_every=map_every,  # Mapping every nth frame
     keyframe_every=keyframe_every,  # Keyframe every nth frame
-    report_global_progress_every=50,  # Report Global Progress every nth frame
+    report_global_progress_every=10,  # Report Global Progress every nth frame
     eval_every=1,  # Evaluate every nth frame (at end of SLAM)
     # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
     scene_radius_depth_ratio=3,
     # Mean-squared distance method: "projective" or "knn".
     mean_sq_dist_method="projective",
     # Gaussian covariance: "isotropic" or "anisotropic".
-    gaussian_distribution="isotropic",
+    gaussian_distribution="anisotropic",
+    surface_init=dict(
+        normal_window=5,
+        fallback_normal_window=3,
+        depth_abs_thresh=0.02,
+        depth_rel_thresh=0.02,
+        min_plane_points=6,
+        max_planarity_ratio=0.05,
+        min_view_cos=0.2,
+        normal_scale_min_ratio=0.05,
+        normal_scale_max_ratio=0.25,
+        node_min_valid_fraction=0.5,
+        node_min_inlier_fraction=0.8,
+        geometry_batch_size=32768,
+        min_scale=1e-6,
+    ),
+    surface_regularization=dict(
+        enabled=True,
+        min_normal_to_tangent_ratio=0.05,
+        max_normal_to_tangent_ratio=0.25,
+        max_normal_deviation_degrees=15.0,
+        thickness_weight=0.1,
+        normal_weight=0.05,
+    ),
     global_optimization=True,  # 是否全局优化
-    global_times=20,  # 全局优化轮数
+    global_times=10,  # 全局优化轮数
     report_iter_progress=False,
     load_checkpoint=False,
     checkpoint_time_idx=0,
@@ -96,7 +119,7 @@ config = dict(
         quadtree_contrast_threshold=0.01,  # 四叉树对比度阈值要求
     ),
     tracking=dict(
-        use_gt_poses=False,  # Use GT Poses for Tracking
+        use_gt_poses=True,  # Use GT Poses for Tracking
         forward_prop=True,  # Forward Propagate Poses
         visualize_tracking_loss=False,  # Visualize Tracking Diff Images
         num_iters=tracking_iters,

@@ -11,13 +11,17 @@ from utils.slam_helpers import (
 )
 
 from qcg_slam import context as slam_context
-from qcg_slam.parameters import initialize_new_params, initialize_finer_params
+from qcg_slam.parameters import (
+    initialize_new_params,
+    initialize_finer_params,
+    surface_normals_from_rotations,
+)
 from qcg_slam.pointcloud import get_pointcloud, get_quadtree_pointcloud
 
 
 def add_coarse_gaussians(params, variables, curr_data, sil_thres, time_idx,
                          mean_sq_dist_method, gaussian_distribution,
-                         scene_name):
+                         scene_name, surface_init_config=None):
     """Add coarse Gaussians for unobserved silhouette regions."""
     # Silhouette Rendering
     transformed_gaussians = transform_to_frame(params,
@@ -60,7 +64,7 @@ def add_coarse_gaussians(params, variables, curr_data, sil_thres, time_idx,
         # non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
         non_presence_mask = non_presence_mask & valid_depth_mask  # 输入没有展平的mask
 
-        new_pt_cld, mean3_sq_dist = get_quadtree_pointcloud(
+        new_pt_cld, init_scales, init_rotations = get_quadtree_pointcloud(
             curr_data['im'],
             curr_data['depth'],
             curr_data['quadtree'],
@@ -70,15 +74,24 @@ def add_coarse_gaussians(params, variables, curr_data, sil_thres, time_idx,
             compute_mean_sq_dist=True,
             mean_sq_dist_method=mean_sq_dist_method,
             time_idx=time_idx,
-            scene_name=scene_name)
+            scene_name=scene_name,
+            gaussian_distribution=gaussian_distribution,
+            surface_init_config=surface_init_config)
         # print("new quadtree points: ", new_pt_cld.shape[0], "\n")
         if new_pt_cld.shape[0] != 0:
-            new_params = initialize_new_params(new_pt_cld, mean3_sq_dist,
+            new_params = initialize_new_params(new_pt_cld, init_scales,
+                                               init_rotations,
                                                gaussian_distribution)
+            if gaussian_distribution == "anisotropic":
+                new_surface_normals = surface_normals_from_rotations(
+                    init_rotations)
             for k, v in new_params.items():
                 # 将新生成的高斯点拼接到已有的高斯点集合里，params[k]是原来的，v是新的，通过cat拼接到一起
                 params[k] = torch.nn.Parameter(
                     torch.cat((params[k], v), dim=0).requires_grad_(True))
+            if gaussian_distribution == "anisotropic":
+                params['surface_normals'] = torch.cat(
+                    (params['surface_normals'], new_surface_normals), dim=0)
             num_pts = params['means3D'].shape[0]
             variables['means2D_gradient_accum'] = torch.zeros(
                 num_pts, device=slam_context.device).float()
@@ -95,7 +108,8 @@ def add_coarse_gaussians(params, variables, curr_data, sil_thres, time_idx,
 
 
 def add_fine_gaussians(params, variables, curr_data, sil_thres, color_thres,
-                       time_idx, mean_sq_dist_method, gaussian_distribution):
+                       time_idx, mean_sq_dist_method, gaussian_distribution,
+                       surface_init_config=None):
     """Add fine Gaussians for color, depth, and silhouette residuals."""
     # Silhouette Rendering
     transformed_gaussians = transform_to_frame(params,
@@ -138,19 +152,28 @@ def add_fine_gaussians(params, variables, curr_data, sil_thres, color_thres,
         curr_w2c[:3, 3] = curr_cam_tran
         valid_depth_mask = (curr_data['depth'][0, :, :] > 0)
         non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
-        new_pt_cld, mean3_sq_dist = get_pointcloud(
+        new_pt_cld, init_scales, init_rotations = get_pointcloud(
             curr_data['im'],
             curr_data['depth'],
             curr_data['intrinsics'],
             curr_w2c,
             mask=non_presence_mask,
             compute_mean_sq_dist=True,
-            mean_sq_dist_method=mean_sq_dist_method)
-        new_params = initialize_finer_params(new_pt_cld, mean3_sq_dist,
+            mean_sq_dist_method=mean_sq_dist_method,
+            gaussian_distribution=gaussian_distribution,
+            surface_init_config=surface_init_config)
+        new_params = initialize_finer_params(new_pt_cld, init_scales,
+                                             init_rotations,
                                              gaussian_distribution)
+        if gaussian_distribution == "anisotropic":
+            new_surface_normals = surface_normals_from_rotations(
+                init_rotations)
         for k, v in new_params.items():
             params[k] = torch.nn.Parameter(
                 torch.cat((params[k], v), dim=0).requires_grad_(True))
+        if gaussian_distribution == "anisotropic":
+            params['surface_normals'] = torch.cat(
+                (params['surface_normals'], new_surface_normals), dim=0)
         num_pts = params['means3D'].shape[0]
         variables['means2D_gradient_accum'] = torch.zeros(
             num_pts, device=slam_context.device).float()

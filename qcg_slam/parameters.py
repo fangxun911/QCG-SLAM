@@ -2,37 +2,74 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+
+from utils.slam_external import build_rotation
 
 from qcg_slam import context as slam_context
 
 
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist,
-                      gaussian_distribution):
-    """Initialize Gaussian and camera parameters for optimization."""
-    num_pts = init_pt_cld.shape[0]
-    means3D = init_pt_cld[:, :3]  # [num_gaussians, 3]
-    # 原始3D高斯是R S S^T R^T，现在改成 r，那么 R = 单位值，S = log(sqrt(r ** 2))
-    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
-    # logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float,
-    # device=slam_context.device)
-    logit_opacities = torch.ones(
-        (num_pts, 1), dtype=torch.float, device=slam_context.device) * 2.1
-    if gaussian_distribution == "isotropic":
-        log_scales = torch.tile(
-            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
-    elif gaussian_distribution == "anisotropic":
-        log_scales = torch.tile(
-            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
-    else:
+def surface_normals_from_rotations(rotations):
+    """Return the world-space local z axis for wxyz rotations."""
+    return build_rotation(F.normalize(rotations.detach(), dim=1))[:, :, 2]
+
+
+def _validate_gaussian_geometry(scales, rotations, num_points,
+                                gaussian_distribution):
+    expected_scale_dims = 1 if gaussian_distribution == "isotropic" else 3
+    if gaussian_distribution not in ("isotropic", "anisotropic"):
         raise ValueError(
             f"Unknown gaussian_distribution {gaussian_distribution}")
-    params = {
-        'means3D': means3D,
-        'rgb_colors': init_pt_cld[:, 3:6],
-        'unnorm_rotations': unnorm_rots,
-        'logit_opacities': logit_opacities,
-        'log_scales': log_scales,
+    if scales.shape != (num_points, expected_scale_dims):
+        raise ValueError(
+            f"Expected {gaussian_distribution} scales with shape "
+            f"({num_points}, {expected_scale_dims}), got {tuple(scales.shape)}")
+    if rotations.shape != (num_points, 4):
+        raise ValueError(
+            f"Expected rotations with shape ({num_points}, 4), got "
+            f"{tuple(rotations.shape)}")
+    if not torch.isfinite(scales).all() or (scales <= 0).any():
+        raise ValueError("Gaussian scales must be finite and strictly positive")
+    if not torch.isfinite(rotations).all() or (
+            torch.linalg.vector_norm(rotations, dim=1) <= 0).any():
+        raise ValueError("Gaussian rotations must be finite non-zero quaternions")
+    return scales, torch.nn.functional.normalize(rotations, dim=1)
+
+
+def _initialize_gaussian_params(point_cloud, scales, rotations, opacity_logit,
+                                gaussian_distribution):
+    num_points = point_cloud.shape[0]
+    scales, rotations = _validate_gaussian_geometry(
+        scales, rotations, num_points, gaussian_distribution)
+    return {
+        'means3D': point_cloud[:, :3],
+        'rgb_colors': point_cloud[:, 3:6],
+        'unnorm_rotations': rotations,
+        'logit_opacities': torch.full(
+            (num_points, 1),
+            opacity_logit,
+            dtype=torch.float,
+            device=slam_context.device),
+        'log_scales': torch.log(scales),
     }
+
+
+def _make_trainable(params):
+    for key, value in params.items():
+        if not isinstance(value, torch.Tensor):
+            value = torch.tensor(value, device=slam_context.device).float()
+        params[key] = torch.nn.Parameter(
+            value.float().contiguous().requires_grad_(True)).to(
+                slam_context.device)
+    return params
+
+
+def initialize_params(init_pt_cld, num_frames, init_scales, init_rotations,
+                      gaussian_distribution):
+    """Initialize Gaussian and camera parameters for optimization."""
+    params = _initialize_gaussian_params(init_pt_cld, init_scales,
+                                         init_rotations, 2.1,
+                                         gaussian_distribution)
 
     # Initialize a single gaussian trajectory to model the camera poses relative
     # to the first frame
@@ -43,16 +80,10 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist,
     params['cam_trans'] = np.zeros((1, 3, num_frames))
 
     # 将所有参数变成可学习的参数
-    for k, v in params.items():
-        # Check if value is already a torch tensor
-        if not isinstance(v, torch.Tensor):
-            params[k] = torch.nn.Parameter(
-                torch.tensor(v, device=slam_context.device).float().contiguous(
-                ).requires_grad_(True))
-        else:
-            params[k] = torch.nn.Parameter(
-                v.float().contiguous().requires_grad_(True)).to(
-                    slam_context.device)
+    params = _make_trainable(params)
+    if gaussian_distribution == "anisotropic":
+        params['surface_normals'] = surface_normals_from_rotations(
+            params['unnorm_rotations'])
 
     variables = {
         'max_2D_radius':
@@ -72,76 +103,24 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist,
     return params, variables
 
 
-def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
+def initialize_new_params(new_pt_cld, init_scales, init_rotations,
+                          gaussian_distribution):
     """Initialize trainable parameters for newly added Gaussians."""
-    num_pts = new_pt_cld.shape[0]
-    means3D = new_pt_cld[:, :3]  # [num_gaussians, 3]
-    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
-    logit_opacities = torch.ones(
-        (num_pts, 1), dtype=torch.float, device=slam_context.device) * 2.0
-    if gaussian_distribution == "isotropic":
-        log_scales = torch.tile(
-            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
-    elif gaussian_distribution == "anisotropic":
-        log_scales = torch.tile(
-            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
-    else:
-        raise ValueError(
-            f"Unknown gaussian_distribution {gaussian_distribution}")
-    params = {
-        'means3D': means3D,
-        'rgb_colors': new_pt_cld[:, 3:6],
-        'unnorm_rotations': unnorm_rots,
-        'logit_opacities': logit_opacities,
-        'log_scales': log_scales,
-    }
-    for k, v in params.items():
-        # Check if value is already a torch tensor
-        if not isinstance(v, torch.Tensor):
-            params[k] = torch.nn.Parameter(
-                torch.tensor(v, device=slam_context.device).float().contiguous(
-                ).requires_grad_(True))
-        else:
-            params[k] = torch.nn.Parameter(
-                v.float().contiguous().requires_grad_(True)).to(
-                    slam_context.device)
+    params = _initialize_gaussian_params(new_pt_cld, init_scales,
+                                         init_rotations, 2.0,
+                                         gaussian_distribution)
+    params = _make_trainable(params)
     # 此函数和initialize_params函数的区别是：该函数只初始化新的点云的信息，不生成相机位姿信息和variables信息
     return params
 
 
-def initialize_finer_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
+def initialize_finer_params(new_pt_cld, init_scales, init_rotations,
+                            gaussian_distribution):
     """Initialize trainable parameters for fine-level Gaussians."""
-    num_pts = new_pt_cld.shape[0]
-    means3D = new_pt_cld[:, :3]  # [num_gaussians, 3]
-    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))  # [num_gaussians, 4]
-    logit_opacities = torch.ones(
-        (num_pts, 1), dtype=torch.float, device=slam_context.device) * 0
-    if gaussian_distribution == "isotropic":
-        log_scales = torch.tile(
-            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
-    elif gaussian_distribution == "anisotropic":
-        log_scales = torch.tile(
-            torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
-    else:
-        raise ValueError(
-            f"Unknown gaussian_distribution {gaussian_distribution}")
-    params = {
-        'means3D': means3D,
-        'rgb_colors': new_pt_cld[:, 3:6],
-        'unnorm_rotations': unnorm_rots,
-        'logit_opacities': logit_opacities,
-        'log_scales': log_scales,
-    }
-    for k, v in params.items():
-        # Check if value is already a torch tensor
-        if not isinstance(v, torch.Tensor):
-            params[k] = torch.nn.Parameter(
-                torch.tensor(v, device=slam_context.device).float().contiguous(
-                ).requires_grad_(True))
-        else:
-            params[k] = torch.nn.Parameter(
-                v.float().contiguous().requires_grad_(True)).to(
-                    slam_context.device)
+    params = _initialize_gaussian_params(new_pt_cld, init_scales,
+                                         init_rotations, 0.0,
+                                         gaussian_distribution)
+    params = _make_trainable(params)
     # 此函数和initialize_params函数的区别是：该函数只初始化新的点云的信息，不生成相机位姿信息和variables信息
     return params
 

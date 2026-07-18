@@ -15,6 +15,8 @@ from utils.slam_helpers import (
     l1_loss_v1,
 )
 
+from qcg_slam.surface_regularization import surface_regularization_losses
+
 
 def get_loss(params,
              curr_data,
@@ -30,7 +32,8 @@ def get_loss(params,
              do_ba=False,
              plot_dir=None,
              visualize_tracking_loss=False,
-             tracking_iteration=None):
+             tracking_iteration=None,
+             surface_regularization=None):
     """Compute the weighted RGB-D SLAM loss for tracking or mapping."""
     # Initialize Loss Dictionary
     losses = {}
@@ -117,6 +120,11 @@ def get_loss(params,
         losses['im'] = 0.8 * l1_loss_v1(
             im, curr_data['im']) + 0.2 * (1.0 - calc_ssim(im, curr_data['im']))
 
+    if mapping:
+        losses.update(
+            surface_regularization_losses(params, radius > 0,
+                                          surface_regularization))
+
     # Visualize the Diff Images
     if tracking and visualize_tracking_loss:
         fig, ax = plt.subplots(2, 4, figsize=(12, 6))
@@ -175,7 +183,15 @@ def get_loss(params,
         # tracking_iteration), bbox_inches='tight')
         # plt.close()
 
-    weighted_losses = {k: v * loss_weights[k] for k, v in losses.items()}
+    weights = dict(loss_weights)
+    if surface_regularization is not None:
+        weights.update({
+            "surface_thickness": surface_regularization.get(
+                "thickness_weight", 0.0),
+            "surface_normal": surface_regularization.get(
+                "normal_weight", 0.0),
+        })
+    weighted_losses = {k: v * weights[k] for k, v in losses.items()}
     loss = sum(weighted_losses.values())
     # torchvision.utils.save_image(depth / 255, 'rendered_im.png'%loss)
     # torchvision.utils.save_image((silhouette>0.5).float(),

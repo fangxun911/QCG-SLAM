@@ -32,6 +32,7 @@ from qcg_slam.keyframes import (
 from qcg_slam.losses import get_loss
 from qcg_slam.optimization import initialize_camera_pose, initialize_optimizer
 from qcg_slam.runtime import RuntimeStats, report_runtime_stats
+from qcg_slam.surface_regularization import project_surface_geometry
 
 
 class RGBDSLAMRunner:
@@ -187,6 +188,7 @@ class RGBDSLAMRunner:
                 self.config["mean_sq_dist_method"],
                 densify_dataset=self.densify_dataset,
                 gaussian_distribution=self.config["gaussian_distribution"],
+                surface_init_config=self.config["surface_init"],
             )
         else:
             (
@@ -202,6 +204,7 @@ class RGBDSLAMRunner:
                 self.config["mean_sq_dist_method"],
                 gaussian_distribution=self.config["gaussian_distribution"],
                 scene_name=self.config["data"]["sequence"],
+                surface_init_config=self.config["surface_init"],
             )
             self.densify_intrinsics = self.intrinsics
 
@@ -531,6 +534,7 @@ class RGBDSLAMRunner:
                         config["mean_sq_dist_method"],
                         config["gaussian_distribution"],
                         config["data"]["sequence"],
+                        config["surface_init"],
                     )
                     post_num_pts = params["means3D"].shape[0]
                     if config["use_wandb"]:
@@ -596,6 +600,8 @@ class RGBDSLAMRunner:
                         config["mapping"]["use_l1"],
                         config["mapping"]["ignore_outlier_depth_loss"],
                         mapping=True,
+                        surface_regularization=config[
+                            "surface_regularization"],
                     )
                     if config["use_wandb"]:
                         # Report Loss
@@ -644,6 +650,8 @@ class RGBDSLAMRunner:
                                 )
                         # Optimizer Update
                         optimizer.step()
+                        project_surface_geometry(
+                            params, config["surface_regularization"])
                         optimizer.zero_grad(set_to_none=True)
                         # Report Progress
                         if config["report_iter_progress"]:
@@ -693,6 +701,7 @@ class RGBDSLAMRunner:
                     time_idx,
                     config["mean_sq_dist_method"],
                     config["gaussian_distribution"],
+                    config["surface_init"],
                 )
 
                 # Finer lrs
@@ -750,6 +759,8 @@ class RGBDSLAMRunner:
                         config["mapping"]["use_l1"],
                         config["mapping"]["ignore_outlier_depth_loss"],
                         mapping=True,
+                        surface_regularization=config[
+                            "surface_regularization"],
                     )
                     if config["use_wandb"]:
                         # Report Loss
@@ -798,6 +809,8 @@ class RGBDSLAMRunner:
                                 )
                         # Optimizer Update
                         optimizer.step()
+                        project_surface_geometry(
+                            params, config["surface_regularization"])
                         optimizer.zero_grad(set_to_none=True)
                         # Report Progress
                         if config["report_iter_progress"]:
@@ -979,6 +992,7 @@ class RGBDSLAMRunner:
                     config["mapping"]["use_l1"],
                     config["mapping"]["ignore_outlier_depth_loss"],
                     mapping=True,
+                    surface_regularization=config["surface_regularization"],
                 )
                 loss.backward()
                 with torch.no_grad():
@@ -992,6 +1006,8 @@ class RGBDSLAMRunner:
                             config["mapping"]["pruning_dict_global_optimization"],
                         )
                     optimizer.step()
+                    project_surface_geometry(
+                        params, config["surface_regularization"])
                     optimizer.zero_grad(set_to_none=True)
             total_global_optimization_time = (
                 time.time() - global_optimization_start_time

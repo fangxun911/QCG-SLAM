@@ -8,6 +8,7 @@ import torch
 from utils.common_utils import save_params_ckpt
 
 from qcg_slam.keyframes import make_keyframe
+from qcg_slam.parameters import surface_normals_from_rotations
 
 
 def load_checkpoint_state(config, dataset, params, variables, device):
@@ -26,9 +27,29 @@ def load_checkpoint_state(config, dataset, params, variables, device):
                              f"params{checkpoint_time_idx}.npz")
     params = dict(np.load(ckpt_path, allow_pickle=True))
     params = {
-        k: torch.tensor(params[k], device=device).float().requires_grad_(True)
-        for k in params.keys()
+        k: torch.tensor(value, device=device).float().requires_grad_(
+            k != 'surface_normals')
+        for k, value in params.items()
     }
+    expected_scale_dims = 1 if config['gaussian_distribution'] == \
+        'isotropic' else 3
+    if params['log_scales'].ndim != 2 or params['log_scales'].shape[
+            1] != expected_scale_dims:
+        raise ValueError(
+            f"Checkpoint log_scales shape {tuple(params['log_scales'].shape)} "
+            f"does not match {config['gaussian_distribution']} configuration")
+    if config['gaussian_distribution'] == 'anisotropic':
+        num_points = params['means3D'].shape[0]
+        if 'surface_normals' not in params:
+            params['surface_normals'] = surface_normals_from_rotations(
+                params['unnorm_rotations'])
+        if params['surface_normals'].shape != (num_points, 3):
+            raise ValueError(
+                "Checkpoint surface_normals must have shape "
+                f"({num_points}, 3), got {tuple(params['surface_normals'].shape)}"
+            )
+        params['surface_normals'] = torch.nn.functional.normalize(
+            params['surface_normals'].detach(), dim=1)
     variables['max_2D_radius'] = torch.zeros(params['means3D'].shape[0],
                                              device=device).float()
     variables['means2D_gradient_accum'] = torch.zeros(

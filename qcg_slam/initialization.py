@@ -14,7 +14,8 @@ def initialize_first_timestep(dataset,
                               mean_sq_dist_method,
                               densify_dataset=None,
                               gaussian_distribution=None,
-                              scene_name=None):
+                              scene_name=None,
+                              surface_init_config=None):
     """Initialize cameras, point cloud, and parameters from the first frame."""
     # Get RGB-D Data & Camera Parameters
     # 这里的pose是一个4x4矩阵
@@ -49,8 +50,7 @@ def initialize_first_timestep(dataset,
     # 这里能不能用一些预测 depth 的模型把空洞的 depth 补齐呢？
     mask = (depth[0, :, :] > 0)  # Mask out invalid depth values
     # mask = mask.reshape(-1)
-    # mean3_sq_dist 是一个数组，每个3D点对应其中的一个值，也就是文章里的r ** 2
-    init_pt_cld, mean3_sq_dist = get_quadtree_pointcloud(
+    init_pt_cld, init_scales, init_rotations = get_quadtree_pointcloud(
         color,
         depth,
         quadtree,
@@ -60,11 +60,14 @@ def initialize_first_timestep(dataset,
         compute_mean_sq_dist=True,
         mean_sq_dist_method=mean_sq_dist_method,
         time_idx=0,
-        scene_name=scene_name)
+        scene_name=scene_name,
+        gaussian_distribution=gaussian_distribution,
+        surface_init_config=surface_init_config)
 
     # Initialize Parameters
-    params, variables = initialize_params(init_pt_cld, num_frames,
-                                          mean3_sq_dist, gaussian_distribution)
+    params, variables = initialize_params(init_pt_cld, num_frames, init_scales,
+                                          init_rotations,
+                                          gaussian_distribution)
 
     # Initialize an estimate of scene radius for Gaussian-Splatting
     # Densification

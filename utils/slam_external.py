@@ -132,7 +132,11 @@ def update_params_and_optimizer(new_params, params, optimizer):
 
 def cat_params_to_optimizer(new_params, params, optimizer):
     for k, v in new_params.items():
-        group = [g for g in optimizer.param_groups if g['name'] == k][0]
+        groups = [g for g in optimizer.param_groups if g['name'] == k]
+        if not groups:
+            params[k] = torch.cat((params[k], v.detach()), dim=0)
+            continue
+        group = groups[0]
         stored_state = optimizer.state.get(group['params'][0], None)
         if stored_state is not None:
             stored_state["exp_avg"] = torch.cat(
@@ -157,7 +161,11 @@ def remove_points(to_remove, params, variables, optimizer):
         k for k in params.keys() if k not in ['cam_unnorm_rots', 'cam_trans']
     ]
     for k in keys:
-        group = [g for g in optimizer.param_groups if g['name'] == k][0]
+        groups = [g for g in optimizer.param_groups if g['name'] == k]
+        if not groups:
+            params[k] = params[k][to_keep].detach()
+            continue
+        group = groups[0]
         stored_state = optimizer.state.get(group['params'][0], None)
         if stored_state is not None:
             stored_state["exp_avg"] = stored_state["exp_avg"][to_keep]
