@@ -33,7 +33,7 @@ num_frames = scene_num_frames[int(os.environ["SCENE"])]
 
 map_every = 1
 keyframe_every = 1
-tracking_iters = 300
+tracking_iters = 200
 coarse_mapping_iters = 15
 fine_mapping_iters = 45
 mapping_iters = coarse_mapping_iters + fine_mapping_iters
