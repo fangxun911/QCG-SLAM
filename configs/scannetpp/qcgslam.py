@@ -5,14 +5,20 @@ import datetime
 primary_device = "cuda"
 
 scenes = [
-    '1a3100752b', '7c31a42404', '8b5caf3398', '85251de7d1', 'b20a261fdf',
-    'd3ba8b4232', 'e01b287af5', 'f34d532901'
+    "1a3100752b",
+    "7c31a42404",
+    "8b5caf3398",
+    "85251de7d1",
+    "b20a261fdf",
+    "d3ba8b4232",
+    "e01b287af5",
+    "f34d532901",
 ]
 
 seed = 0
 
 # Export SCENE env variable before running
-os.environ["SCENE"] = "1"
+os.environ["SCENE"] = "2"
 
 # Train Split Eval
 use_train_split = True
@@ -34,7 +40,7 @@ mapping_iters = coarse_mapping_iters + fine_mapping_iters
 
 group_name = "ScanNet++"
 now = datetime.datetime.now().strftime("%m%d%H%M")
-run_name = f"{scene_name}_{seed}_test_color_thres0.25"
+run_name = f"{scene_name}_{seed}"
 
 config = dict(
     workdir=f"./experiments/{group_name}",
@@ -90,7 +96,7 @@ config = dict(
         quadtree_contrast_threshold=0.01,  # 四叉树对比度阈值要求
     ),
     tracking=dict(
-        use_gt_poses=True,  # Use GT Poses for Tracking
+        use_gt_poses=False,  # Use GT Poses for Tracking
         forward_prop=True,  # Forward Propagate Poses
         visualize_tracking_loss=False,  # Visualize Tracking Diff Images
         num_iters=tracking_iters,
@@ -212,7 +218,7 @@ config = dict(
         ),
     ),
     viz=dict(
-        render_mode='color',  # ['color', 'depth' or 'centers']
+        render_mode="color",  # ['color', 'depth' or 'centers']
         # Offset final-recon view camera back by 0.5 units.
         offset_first_viz_cam=True,
         show_sil=False,  # Show Silhouette instead of RGB
