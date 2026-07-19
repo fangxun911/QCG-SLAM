@@ -1,7 +1,6 @@
 """Main QCG-SLAM RGB-D tracking and mapping pipeline."""
 
 import os
-import time
 
 from pprint import pprint
 import numpy as np
@@ -10,27 +9,21 @@ from tqdm import tqdm
 import wandb
 
 from datasets.gradslam_datasets import load_dataset_config
-from utils.common_utils import save_params_ckpt, save_params
-from utils.eval_helpers import report_loss, report_progress
+from utils.common_utils import save_params
 from utils.eval_helpers import eval as eval_slam
-from utils.slam_external import prune_gaussians, densify
 
 from qcg_slam.checkpoints import load_checkpoint_state, save_checkpoint_state
 from qcg_slam.config import prepare_config, prepare_dataset_config
 from qcg_slam import context as slam_context
 from qcg_slam.datasets import get_dataset
-from qcg_slam.gaussians import add_coarse_gaussians, add_fine_gaussians
-from qcg_slam.initialization import initialize_first_timestep
-from qcg_slam.keyframes import (
-    estimated_w2c_from_params,
-    make_keyframe,
-    select_fine_mapping_frame,
-    should_add_keyframe,
+from qcg_slam.densification import (
+    DensificationResources,
+    load_densification_dataset,
 )
-from qcg_slam.losses import get_loss
-from qcg_slam.optimization import initialize_optimizer
+from qcg_slam.initialization import initialize_first_timestep
+from qcg_slam.keyframes import make_keyframe, should_add_keyframe
+from qcg_slam.mapping import map_frame, run_global_mapping
 from qcg_slam.runtime import RuntimeStats, report_runtime_stats
-from qcg_slam.surface_regularization import project_surface_geometry
 from qcg_slam.tracking import (
     initialize_tracking_camera,
     load_tracking_dataset,
@@ -142,19 +135,8 @@ class RGBDSLAMRunner:
             self.num_frames = len(self.dataset)
 
         if self.separate_densification_res:
-            self.densify_dataset = get_dataset(
-                config_dict=self.gradslam_data_cfg,
-                basedir=self.dataset_config["basedir"],
-                sequence=os.path.basename(self.dataset_config["sequence"]),
-                start=self.dataset_config["start"],
-                end=self.dataset_config["end"],
-                stride=self.dataset_config["stride"],
-                desired_height=self.dataset_config["densification_image_height"],
-                desired_width=self.dataset_config["densification_image_width"],
-                device=self.device,
-                relative_pose=True,
-                ignore_bad=self.dataset_config["ignore_bad"],
-                use_train_split=self.dataset_config["use_train_split"],
+            self.densify_dataset = load_densification_dataset(
+                self.gradslam_data_cfg, self.dataset_config, self.device
             )
 
         if self.separate_tracking_res:
@@ -236,10 +218,11 @@ class RGBDSLAMRunner:
         tracking_dataset = self.tracking_dataset
         tracking_cam = self.tracking_cam
         tracking_intrinsics = self.tracking_intrinsics
-        separate_densification_res = self.separate_densification_res
-        densify_dataset = self.densify_dataset
-        densify_intrinsics = self.densify_intrinsics
-        densify_cam = self.densify_cam
+        densification_resources = DensificationResources(
+            dataset=self.densify_dataset,
+            camera=self.densify_cam,
+            intrinsics=self.densify_intrinsics,
+        )
         eval_dir = self.eval_dir
         wandb_run = self.wandb_run
         wandb_time_step = self.wandb_time_step
@@ -289,401 +272,21 @@ class RGBDSLAMRunner:
                 tracking_intrinsics=tracking_intrinsics,
             )
 
-            coarse_num_iters_mapping = config["mapping"]["coarse_num_iters"]
-            fine_num_iters_mapping = config["mapping"]["fine_num_iters"]
-
-            # Densification & KeyFrame-based Mapping（slam肯定是每帧都建图）
-            if time_idx == 0 or (time_idx + 1) % config["map_every"] == 0:
-                # Densification （第0帧不densify，因为已经初始化高斯基元了）
-                if config["mapping"]["add_new_gaussians"] and time_idx > 0:
-                    # Setup Data for Densification
-                    if separate_densification_res:
-                        # Load RGBD frames incrementally instead of all frames
-                        densify_color, densify_depth, _, _ = densify_dataset[time_idx]
-                        densify_color = densify_color.permute(2, 0, 1) / 255
-                        densify_depth = densify_depth.permute(2, 0, 1)
-                        densify_curr_data = {
-                            "cam": densify_cam,
-                            "im": densify_color,
-                            "depth": densify_depth,
-                            "id": time_idx,
-                            "intrinsics": densify_intrinsics,
-                            "w2c": first_frame_w2c,
-                            "iter_gt_w2c_list": curr_gt_w2c,
-                        }
-                    else:
-                        densify_curr_data = curr_data
-
-                    # Add new Gaussians to the scene based on the
-                    # Silhouette在这里加一个bool位，判断是否将本帧视为关键帧
-                    params, variables = add_coarse_gaussians(
-                        params,
-                        variables,
-                        densify_curr_data,
-                        config["mapping"]["sil_thres"],
-                        time_idx,
-                        config["mean_sq_dist_method"],
-                        config["gaussian_distribution"],
-                        config["data"]["sequence"],
-                        config["surface_init"],
-                    )
-                    post_num_pts = params["means3D"].shape[0]
-                    if config["use_wandb"]:
-                        wandb_run.log(
-                            {
-                                "Mapping/Number of Gaussians": post_num_pts,
-                                "Mapping/step": wandb_time_step,
-                            }
-                        )
-
-                with torch.no_grad():
-                    # Get the current estimated rotation & translation
-                    curr_w2c = estimated_w2c_from_params(params, time_idx, device)
-
-                # Reset Optimizer & Learning Rates for Full Map Optimization
-                # Coarse lrs
-                optimizer = initialize_optimizer(
-                    params, config["mapping"]["coarse_lrs"], tracking=False
-                )
-
-                # Mapping
-                mapping_start_time = time.time()
-                # 首轮额外优化50次
-                if coarse_num_iters_mapping > 0 and time_idx == 0:
-                    coarse_num_iters_mapping_1 = coarse_num_iters_mapping + 50
-                    progress_bar = tqdm(
-                        range(coarse_num_iters_mapping_1),
-                        desc=f"Coarse Mapping Time Step: {time_idx}",
-                    )
-                elif coarse_num_iters_mapping > 0:
-                    coarse_num_iters_mapping_1 = coarse_num_iters_mapping
-                    progress_bar = tqdm(
-                        range(coarse_num_iters_mapping_1),
-                        desc=f"Coarse Mapping Time Step: {time_idx}",
-                    )
-                # Coarse Mapping
-                for iter in range(coarse_num_iters_mapping_1):
-                    iter_start_time = time.time()
-
-                    # Use Current Frame Data
-                    iter_time_idx = time_idx
-                    iter_color = color
-                    iter_depth = depth
-
-                    iter_gt_w2c = gt_w2c_all_frames[: iter_time_idx + 1]
-                    iter_data = {
-                        "cam": cam,
-                        "im": iter_color,
-                        "depth": iter_depth,
-                        "id": iter_time_idx,
-                        "intrinsics": intrinsics,
-                        "w2c": first_frame_w2c,
-                        "iter_gt_w2c_list": iter_gt_w2c,
-                    }
-                    # Loss for current frame
-                    loss, variables, losses = get_loss(
-                        params,
-                        iter_data,
-                        variables,
-                        iter_time_idx,
-                        config["mapping"]["loss_weights"],
-                        config["mapping"]["use_sil_for_loss"],
-                        config["mapping"]["sil_thres"],
-                        config["mapping"]["use_l1"],
-                        config["mapping"]["ignore_outlier_depth_loss"],
-                        mapping=True,
-                        surface_regularization=config["surface_regularization"],
-                    )
-                    if config["use_wandb"]:
-                        # Report Loss
-                        wandb_mapping_step = report_loss(
-                            losses, wandb_run, wandb_mapping_step, mapping=True
-                        )
-                    # Backprop
-                    loss.backward()
-                    with torch.no_grad():
-                        # Prune Gaussians
-                        if config["mapping"]["prune_gaussians"]:
-                            params, variables = prune_gaussians(
-                                params,
-                                variables,
-                                optimizer,
-                                iter,
-                                config["mapping"]["pruning_dict"],
-                            )
-                            if config["use_wandb"]:
-                                wandb_run.log(
-                                    {
-                                        "Mapping/Number of Gaussians - Pruning": params[
-                                            "means3D"
-                                        ].shape[0],
-                                        "Mapping/step": wandb_mapping_step,
-                                    }
-                                )
-                        # Gaussian-Splatting's Gradient-based Densification
-                        # 不用use_gaussian_splatting_densification
-                        if config["mapping"]["use_gaussian_splatting_densification"]:
-                            params, variables = densify(
-                                params,
-                                variables,
-                                optimizer,
-                                iter,
-                                config["mapping"]["densify_dict"],
-                            )
-                            if config["use_wandb"]:
-                                wandb_run.log(
-                                    {
-                                        "Mapping/Number of Gaussians - Densification": params[
-                                            "means3D"
-                                        ].shape[0],
-                                        "Mapping/step": wandb_mapping_step,
-                                    }
-                                )
-                        # Optimizer Update
-                        optimizer.step()
-                        project_surface_geometry(
-                            params, config["surface_regularization"]
-                        )
-                        optimizer.zero_grad(set_to_none=True)
-                        # Report Progress
-                        if config["report_iter_progress"]:
-                            if config["use_wandb"]:
-                                report_progress(
-                                    params,
-                                    iter_data,
-                                    iter + 1,
-                                    progress_bar,
-                                    iter_time_idx,
-                                    sil_thres=config["mapping"]["sil_thres"],
-                                    wandb_run=wandb_run,
-                                    wandb_step=wandb_mapping_step,
-                                    wandb_save_qual=config["wandb"]["save_qual"],
-                                    mapping=True,
-                                    online_time_idx=time_idx,
-                                )
-                            else:
-                                report_progress(
-                                    params,
-                                    iter_data,
-                                    iter + 1,
-                                    progress_bar,
-                                    iter_time_idx,
-                                    sil_thres=config["mapping"]["sil_thres"],
-                                    mapping=True,
-                                    online_time_idx=time_idx,
-                                )
-                        else:
-                            progress_bar.update(1)
-                    # Update the runtime numbers
-                    iter_end_time = time.time()
-                    runtime_stats.add_mapping_iter(iter_end_time - iter_start_time)
-                if coarse_num_iters_mapping_1 > 0:
-                    progress_bar.close()
-                # End of Coarse Mapping
-
-                if config["mapping"]["add_new_gaussians"]:
-                    # finer densification
-                    params, variables = add_fine_gaussians(
-                        params,
-                        variables,
-                        curr_data,
-                        config["mapping"]["sil_thres"],
-                        config["mapping"]["color_thres"],
-                        time_idx,
-                        config["mean_sq_dist_method"],
-                        config["gaussian_distribution"],
-                        config["surface_init"],
-                    )
-
-                # Finer lrs
-                optimizer = initialize_optimizer(
-                    params, config["mapping"]["fine_lrs"], tracking=False
-                )
-
-                # 首轮额外优化100次
-                if fine_num_iters_mapping > 0 and time_idx == 0:
-                    fine_num_iters_mapping_1 = fine_num_iters_mapping + 100
-                    progress_bar = tqdm(
-                        range(fine_num_iters_mapping_1),
-                        desc=f"Fine Mapping Time Step: {time_idx}",
-                    )
-                elif fine_num_iters_mapping > 0:
-                    fine_num_iters_mapping_1 = fine_num_iters_mapping
-                    progress_bar = tqdm(
-                        range(fine_num_iters_mapping_1),
-                        desc=f"Fine Mapping Time Step: {time_idx}",
-                    )
-                # Fine Mapping
-                for iter in range(fine_num_iters_mapping_1):
-                    iter_start_time = time.time()
-
-                    iter_time_idx, iter_color, iter_depth = select_fine_mapping_frame(
-                        iter,
-                        time_idx,
-                        keyframe_time_indices,
-                        keyframe_list,
-                        color,
-                        depth,
-                    )
-
-                    iter_gt_w2c = gt_w2c_all_frames[: iter_time_idx + 1]
-                    iter_data = {
-                        "cam": cam,
-                        "im": iter_color,
-                        "depth": iter_depth,
-                        "id": iter_time_idx,
-                        "intrinsics": intrinsics,
-                        "w2c": first_frame_w2c,
-                        "iter_gt_w2c_list": iter_gt_w2c,
-                    }
-                    # Loss for current frame
-                    loss, variables, losses = get_loss(
-                        params,
-                        iter_data,
-                        variables,
-                        iter_time_idx,
-                        config["mapping"]["loss_weights"],
-                        config["mapping"]["use_sil_for_loss"],
-                        config["mapping"]["sil_thres"],
-                        config["mapping"]["use_l1"],
-                        config["mapping"]["ignore_outlier_depth_loss"],
-                        mapping=True,
-                        surface_regularization=config["surface_regularization"],
-                    )
-                    if config["use_wandb"]:
-                        # Report Loss
-                        wandb_mapping_step = report_loss(
-                            losses, wandb_run, wandb_mapping_step, mapping=True
-                        )
-                    # Backprop
-                    loss.backward()
-                    with torch.no_grad():
-                        # Prune Gaussians
-                        if config["mapping"]["prune_gaussians"]:
-                            params, variables = prune_gaussians(
-                                params,
-                                variables,
-                                optimizer,
-                                iter,
-                                config["mapping"]["pruning_dict"],
-                            )
-                            if config["use_wandb"]:
-                                wandb_run.log(
-                                    {
-                                        "Mapping/Number of Gaussians - Pruning": params[
-                                            "means3D"
-                                        ].shape[0],
-                                        "Mapping/step": wandb_mapping_step,
-                                    }
-                                )
-                        # Gaussian-Splatting's Gradient-based Densification
-                        # 不用use_gaussian_splatting_densification
-                        if config["mapping"]["use_gaussian_splatting_densification"]:
-                            params, variables = densify(
-                                params,
-                                variables,
-                                optimizer,
-                                iter,
-                                config["mapping"]["densify_dict"],
-                            )
-                            if config["use_wandb"]:
-                                wandb_run.log(
-                                    {
-                                        "Mapping/Number of Gaussians - Densification": params[
-                                            "means3D"
-                                        ].shape[0],
-                                        "Mapping/step": wandb_mapping_step,
-                                    }
-                                )
-                        # Optimizer Update
-                        optimizer.step()
-                        project_surface_geometry(
-                            params, config["surface_regularization"]
-                        )
-                        optimizer.zero_grad(set_to_none=True)
-                        # Report Progress
-                        if config["report_iter_progress"]:
-                            if config["use_wandb"]:
-                                report_progress(
-                                    params,
-                                    iter_data,
-                                    iter + 1,
-                                    progress_bar,
-                                    iter_time_idx,
-                                    sil_thres=config["mapping"]["sil_thres"],
-                                    wandb_run=wandb_run,
-                                    wandb_step=wandb_mapping_step,
-                                    wandb_save_qual=config["wandb"]["save_qual"],
-                                    mapping=True,
-                                    online_time_idx=time_idx,
-                                )
-                            else:
-                                report_progress(
-                                    params,
-                                    iter_data,
-                                    iter + 1,
-                                    progress_bar,
-                                    iter_time_idx,
-                                    sil_thres=config["mapping"]["sil_thres"],
-                                    mapping=True,
-                                    online_time_idx=time_idx,
-                                )
-                        else:
-                            progress_bar.update(1)
-                    # Update the runtime numbers
-                    iter_end_time = time.time()
-                    runtime_stats.add_mapping_iter(iter_end_time - iter_start_time)
-                if fine_num_iters_mapping_1 > 0:
-                    progress_bar.close()
-                # End of Fine Mapping
-
-                # Update the runtime numbers
-                mapping_end_time = time.time()
-                runtime_stats.add_mapping_frame(mapping_end_time - mapping_start_time)
-
-                if (
-                    time_idx == 0
-                    or (time_idx + 1) % config["report_global_progress_every"] == 0
-                ):
-                    try:
-                        # Report Mapping Progress
-                        progress_bar = tqdm(
-                            range(1), desc=f"Mapping Result Time Step: {time_idx}"
-                        )
-                        with torch.no_grad():
-                            if config["use_wandb"]:
-                                report_progress(
-                                    params,
-                                    curr_data,
-                                    1,
-                                    progress_bar,
-                                    time_idx,
-                                    sil_thres=config["mapping"]["sil_thres"],
-                                    wandb_run=wandb_run,
-                                    wandb_step=wandb_time_step,
-                                    wandb_save_qual=config["wandb"]["save_qual"],
-                                    mapping=True,
-                                    online_time_idx=time_idx,
-                                    global_logging=True,
-                                )
-                            else:
-                                report_progress(
-                                    params,
-                                    curr_data,
-                                    1,
-                                    progress_bar,
-                                    time_idx,
-                                    sil_thres=config["mapping"]["sil_thres"],
-                                    mapping=True,
-                                    online_time_idx=time_idx,
-                                )
-                        progress_bar.close()
-                    except BaseException:
-                        ckpt_output_dir = os.path.join(
-                            config["workdir"], config["run_name"]
-                        )
-                        save_params_ckpt(params, ckpt_output_dir, time_idx)
-                        print("Failed to evaluate trajectory.")
+            params, variables, wandb_mapping_step = map_frame(
+                params=params,
+                variables=variables,
+                curr_data=curr_data,
+                time_idx=time_idx,
+                config=config,
+                device=device,
+                runtime_stats=runtime_stats,
+                keyframe_time_indices=keyframe_time_indices,
+                keyframe_list=keyframe_list,
+                densification_resources=densification_resources,
+                wandb_run=wandb_run,
+                wandb_time_step=wandb_time_step,
+                wandb_mapping_step=wandb_mapping_step,
+            )
 
             # Add frame to keyframe list
             # 增加关键帧（第一帧、距离上一个关键帧已经隔了keyframe_every帧、倒数第2帧）
@@ -734,80 +337,20 @@ class RGBDSLAMRunner:
 
     def run_global_optimization(self):
         """Run the optional post-SLAM keyframe optimization pass."""
-        config = self.config
-        params = self.params
-        variables = self.variables
-        keyframe_list = self.keyframe_list
-        gt_w2c_all_frames = self.gt_w2c_all_frames
-        cam = self.cam
-        intrinsics = self.intrinsics
-        first_frame_w2c = self.first_frame_w2c
-
-        if "global_optimization" not in config:
-            config["global_optimization"] = False
-        total_global_optimization_time = 0.0
-        if config["global_optimization"]:
-            global_optimization_start_time = time.time()
-            # Global Optimization
-            optimizer = initialize_optimizer(
-                params, config["mapping"]["global_lrs"], tracking=False
-            )
-            for global_time_idx in tqdm(
-                range(config["global_times"] * len(keyframe_list))
-            ):
-                selected_rand_keyframe_idx = np.random.randint(0, len(keyframe_list))
-                iter_time_idx = keyframe_list[selected_rand_keyframe_idx]["id"]
-                iter_color = keyframe_list[selected_rand_keyframe_idx]["color"]
-                iter_depth = keyframe_list[selected_rand_keyframe_idx]["depth"]
-                iter_gt_w2c = gt_w2c_all_frames[: iter_time_idx + 1]
-                iter_data = {
-                    "cam": cam,
-                    "im": iter_color,
-                    "depth": iter_depth,
-                    "id": iter_time_idx,
-                    "intrinsics": intrinsics,
-                    "w2c": first_frame_w2c,
-                    "iter_gt_w2c_list": iter_gt_w2c,
-                }
-                # Loss for current frame
-                loss, variables, losses = get_loss(
-                    params,
-                    iter_data,
-                    variables,
-                    iter_time_idx,
-                    config["mapping"]["loss_weights"],
-                    config["mapping"]["use_sil_for_loss"],
-                    config["mapping"]["sil_thres"],
-                    config["mapping"]["use_l1"],
-                    config["mapping"]["ignore_outlier_depth_loss"],
-                    mapping=True,
-                    surface_regularization=config["surface_regularization"],
-                )
-                loss.backward()
-                with torch.no_grad():
-                    # Prune Gaussians
-                    if config["mapping"]["prune_gaussians"]:
-                        params, variables = prune_gaussians(
-                            params,
-                            variables,
-                            optimizer,
-                            global_time_idx,
-                            config["mapping"]["pruning_dict_global_optimization"],
-                        )
-                    optimizer.step()
-                    project_surface_geometry(params, config["surface_regularization"])
-                    optimizer.zero_grad(set_to_none=True)
-            total_global_optimization_time = (
-                time.time() - global_optimization_start_time
-            )
-            print(
-                "Total Global Optimization Time: %f s"
-                % (total_global_optimization_time)
-            )
-
-        self.params = params
-        self.variables = variables
-        self.total_global_optimization_time = total_global_optimization_time
+        (
+            self.params,
+            self.variables,
+            self.total_global_optimization_time,
+        ) = run_global_mapping(
+            params=self.params,
+            variables=self.variables,
+            keyframe_list=self.keyframe_list,
+            gt_w2c_all_frames=self.gt_w2c_all_frames,
+            config=self.config,
+            camera=self.cam,
+            intrinsics=self.intrinsics,
+            first_frame_w2c=self.first_frame_w2c,
+        )
 
     def finalize(self):
         """Report runtime, evaluate final parameters, and save outputs."""
