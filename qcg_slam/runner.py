@@ -557,6 +557,7 @@ class RGBDSLAMRunner:
 
                 # Mapping
                 mapping_start_time = time.time()
+                # 首轮额外优化50次
                 if coarse_num_iters_mapping > 0 and time_idx == 0:
                     coarse_num_iters_mapping_1 = coarse_num_iters_mapping + 50
                     progress_bar = tqdm(
@@ -600,8 +601,7 @@ class RGBDSLAMRunner:
                         config["mapping"]["use_l1"],
                         config["mapping"]["ignore_outlier_depth_loss"],
                         mapping=True,
-                        surface_regularization=config[
-                            "surface_regularization"],
+                        surface_regularization=config["surface_regularization"],
                     )
                     if config["use_wandb"]:
                         # Report Loss
@@ -651,7 +651,8 @@ class RGBDSLAMRunner:
                         # Optimizer Update
                         optimizer.step()
                         project_surface_geometry(
-                            params, config["surface_regularization"])
+                            params, config["surface_regularization"]
+                        )
                         optimizer.zero_grad(set_to_none=True)
                         # Report Progress
                         if config["report_iter_progress"]:
@@ -689,29 +690,26 @@ class RGBDSLAMRunner:
                     progress_bar.close()
                 # End of Coarse Mapping
 
-                torch.cuda.empty_cache()
-
-                # finer densification
-                params, variables = add_fine_gaussians(
-                    params,
-                    variables,
-                    curr_data,
-                    config["mapping"]["sil_thres"],
-                    config["mapping"]["color_thres"],
-                    time_idx,
-                    config["mean_sq_dist_method"],
-                    config["gaussian_distribution"],
-                    config["surface_init"],
-                )
+                if config["mapping"]["add_new_gaussians"]:
+                    # finer densification
+                    params, variables = add_fine_gaussians(
+                        params,
+                        variables,
+                        curr_data,
+                        config["mapping"]["sil_thres"],
+                        config["mapping"]["color_thres"],
+                        time_idx,
+                        config["mean_sq_dist_method"],
+                        config["gaussian_distribution"],
+                        config["surface_init"],
+                    )
 
                 # Finer lrs
                 optimizer = initialize_optimizer(
                     params, config["mapping"]["fine_lrs"], tracking=False
                 )
 
-                # if fine_num_iters_mapping > 0:
-                # progress_bar = tqdm(range(fine_num_iters_mapping), desc=f"Fine
-                # Mapping Time Step: {time_idx}")
+                # 首轮额外优化100次
                 if fine_num_iters_mapping > 0 and time_idx == 0:
                     fine_num_iters_mapping_1 = fine_num_iters_mapping + 100
                     progress_bar = tqdm(
@@ -759,8 +757,7 @@ class RGBDSLAMRunner:
                         config["mapping"]["use_l1"],
                         config["mapping"]["ignore_outlier_depth_loss"],
                         mapping=True,
-                        surface_regularization=config[
-                            "surface_regularization"],
+                        surface_regularization=config["surface_regularization"],
                     )
                     if config["use_wandb"]:
                         # Report Loss
@@ -810,7 +807,8 @@ class RGBDSLAMRunner:
                         # Optimizer Update
                         optimizer.step()
                         project_surface_geometry(
-                            params, config["surface_regularization"])
+                            params, config["surface_regularization"]
+                        )
                         optimizer.zero_grad(set_to_none=True)
                         # Report Progress
                         if config["report_iter_progress"]:
@@ -1006,8 +1004,7 @@ class RGBDSLAMRunner:
                             config["mapping"]["pruning_dict_global_optimization"],
                         )
                     optimizer.step()
-                    project_surface_geometry(
-                        params, config["surface_regularization"])
+                    project_surface_geometry(params, config["surface_regularization"])
                     optimizer.zero_grad(set_to_none=True)
             total_global_optimization_time = (
                 time.time() - global_optimization_start_time
