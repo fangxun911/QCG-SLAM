@@ -13,9 +13,7 @@ from datasets.gradslam_datasets import load_dataset_config
 from utils.common_utils import save_params_ckpt, save_params
 from utils.eval_helpers import report_loss, report_progress
 from utils.eval_helpers import eval as eval_slam
-from utils.recon_helpers import setup_camera
 from utils.slam_external import prune_gaussians, densify
-from utils.slam_helpers import matrix_to_quaternion
 
 from qcg_slam.checkpoints import load_checkpoint_state, save_checkpoint_state
 from qcg_slam.config import prepare_config, prepare_dataset_config
@@ -30,9 +28,14 @@ from qcg_slam.keyframes import (
     should_add_keyframe,
 )
 from qcg_slam.losses import get_loss
-from qcg_slam.optimization import initialize_camera_pose, initialize_optimizer
+from qcg_slam.optimization import initialize_optimizer
 from qcg_slam.runtime import RuntimeStats, report_runtime_stats
 from qcg_slam.surface_regularization import project_surface_geometry
+from qcg_slam.tracking import (
+    initialize_tracking_camera,
+    load_tracking_dataset,
+    track_frame,
+)
 
 
 class RGBDSLAMRunner:
@@ -155,19 +158,8 @@ class RGBDSLAMRunner:
             )
 
         if self.separate_tracking_res:
-            self.tracking_dataset = get_dataset(
-                config_dict=self.gradslam_data_cfg,
-                basedir=self.dataset_config["basedir"],
-                sequence=os.path.basename(self.dataset_config["sequence"]),
-                start=self.dataset_config["start"],
-                end=self.dataset_config["end"],
-                stride=self.dataset_config["stride"],
-                desired_height=self.dataset_config["tracking_image_height"],
-                desired_width=self.dataset_config["tracking_image_width"],
-                device=self.device,
-                relative_pose=True,
-                ignore_bad=self.dataset_config["ignore_bad"],
-                use_train_split=self.dataset_config["use_train_split"],
+            self.tracking_dataset = load_tracking_dataset(
+                self.gradslam_data_cfg, self.dataset_config, self.device
             )
 
     def initialize_state(self):
@@ -209,14 +201,8 @@ class RGBDSLAMRunner:
             self.densify_intrinsics = self.intrinsics
 
         if self.separate_tracking_res:
-            tracking_color, _, self.tracking_intrinsics, _ = self.tracking_dataset[0]
-            tracking_color = tracking_color.permute(2, 0, 1) / 255
-            self.tracking_intrinsics = self.tracking_intrinsics[:3, :3]
-            self.tracking_cam = setup_camera(
-                tracking_color.shape[2],
-                tracking_color.shape[1],
-                self.tracking_intrinsics.cpu().numpy(),
-                self.first_frame_w2c.detach().cpu().numpy(),
+            self.tracking_intrinsics, self.tracking_cam = initialize_tracking_camera(
+                self.tracking_dataset, self.first_frame_w2c
             )
 
         (
@@ -247,7 +233,6 @@ class RGBDSLAMRunner:
         cam = self.cam
         intrinsics = self.intrinsics
         first_frame_w2c = self.first_frame_w2c
-        separate_tracking_res = self.separate_tracking_res
         tracking_dataset = self.tracking_dataset
         tracking_cam = self.tracking_cam
         tracking_intrinsics = self.tracking_intrinsics
@@ -286,220 +271,26 @@ class RGBDSLAMRunner:
                 "iter_gt_w2c_list": curr_gt_w2c,
             }
 
-            # Initialize Data for Tracking
-            if separate_tracking_res:
-                tracking_color, tracking_depth, _, _ = tracking_dataset[time_idx]
-                tracking_color = tracking_color.permute(2, 0, 1) / 255
-                tracking_depth = tracking_depth.permute(2, 0, 1)
-                tracking_curr_data = {
-                    "cam": tracking_cam,
-                    "im": tracking_color,
-                    "depth": tracking_depth,
-                    "id": iter_time_idx,
-                    "intrinsics": tracking_intrinsics,
-                    "w2c": first_frame_w2c,
-                    "iter_gt_w2c_list": curr_gt_w2c,
-                }
-            else:
-                tracking_curr_data = curr_data
+            params, variables, wandb_tracking_step = track_frame(
+                params=params,
+                variables=variables,
+                curr_data=curr_data,
+                curr_gt_w2c=curr_gt_w2c,
+                time_idx=time_idx,
+                config=config,
+                eval_dir=eval_dir,
+                runtime_stats=runtime_stats,
+                wandb_run=wandb_run,
+                wandb_time_step=wandb_time_step,
+                wandb_tracking_step=wandb_tracking_step,
+                first_frame_w2c=first_frame_w2c,
+                tracking_dataset=tracking_dataset,
+                tracking_camera=tracking_cam,
+                tracking_intrinsics=tracking_intrinsics,
+            )
 
-            # Optimization Iterations
             coarse_num_iters_mapping = config["mapping"]["coarse_num_iters"]
             fine_num_iters_mapping = config["mapping"]["fine_num_iters"]
-
-            # Initialize the camera pose for the current frame
-            # 根据匀速假设，更新相机位姿信息
-            if time_idx > 0:
-                params = initialize_camera_pose(
-                    params, time_idx, forward_prop=config["tracking"]["forward_prop"]
-                )
-
-            # Tracking
-            tracking_start_time = time.time()
-            # 第0帧不进行位姿优化，且全程不用真实位姿
-            if time_idx > 0 and not config["tracking"]["use_gt_poses"]:
-                # Reset Optimizer & Learning Rates for tracking
-                optimizer = initialize_optimizer(
-                    params, config["tracking"]["lrs"], tracking=True
-                )
-                # Keep Track of Best Candidate Rotation & Translation
-                candidate_cam_unnorm_rot = (
-                    params["cam_unnorm_rots"][..., time_idx].detach().clone()
-                )
-                candidate_cam_tran = params["cam_trans"][..., time_idx].detach().clone()
-                current_min_loss = float(1e20)
-                # Tracking Optimization
-                iter = 0
-                do_continue_slam = False
-                num_iters_tracking = config["tracking"]["num_iters"]
-                progress_bar = tqdm(
-                    range(num_iters_tracking), desc=f"Tracking Time Step: {time_idx}"
-                )
-                while True:
-                    iter_start_time = time.time()
-                    # Loss for current frame
-                    loss, variables, losses = get_loss(
-                        params,
-                        tracking_curr_data,
-                        variables,
-                        iter_time_idx,
-                        config["tracking"]["loss_weights"],
-                        config["tracking"]["use_sil_for_loss"],
-                        config["tracking"]["sil_thres"],
-                        config["tracking"]["use_l1"],
-                        config["tracking"]["ignore_outlier_depth_loss"],
-                        tracking=True,
-                        plot_dir=eval_dir,
-                        visualize_tracking_loss=config["tracking"][
-                            "visualize_tracking_loss"
-                        ],
-                        tracking_iteration=iter,
-                    )
-                    if config["use_wandb"]:
-                        # Report Loss
-                        wandb_tracking_step = report_loss(
-                            losses, wandb_run, wandb_tracking_step, tracking=True
-                        )
-                    # Backprop
-                    loss.backward()
-                    # Optimizer Update
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    with torch.no_grad():
-                        # Save the best candidate rotation & translation
-                        if loss < current_min_loss:
-                            current_min_loss = loss
-                            candidate_cam_unnorm_rot = (
-                                params["cam_unnorm_rots"][..., time_idx]
-                                .detach()
-                                .clone()
-                            )
-                            candidate_cam_tran = (
-                                params["cam_trans"][..., time_idx].detach().clone()
-                            )
-                        # Report Progress
-                        if config["report_iter_progress"]:  # False
-                            if config["use_wandb"]:
-                                report_progress(
-                                    params,
-                                    tracking_curr_data,
-                                    iter + 1,
-                                    progress_bar,
-                                    iter_time_idx,
-                                    sil_thres=config["tracking"]["sil_thres"],
-                                    tracking=True,
-                                    wandb_run=wandb_run,
-                                    wandb_step=wandb_tracking_step,
-                                    wandb_save_qual=config["wandb"]["save_qual"],
-                                )
-                            else:
-                                report_progress(
-                                    params,
-                                    tracking_curr_data,
-                                    iter + 1,
-                                    progress_bar,
-                                    iter_time_idx,
-                                    sil_thres=config["tracking"]["sil_thres"],
-                                    tracking=True,
-                                )
-                        else:
-                            progress_bar.update(1)
-                    # Update the runtime numbers
-                    iter_end_time = time.time()
-                    runtime_stats.add_tracking_iter(iter_end_time - iter_start_time)
-                    # Check if we should stop tracking
-                    iter += 1
-                    if iter == num_iters_tracking:
-                        # print(losses['depth'])
-                        if (
-                            losses["depth"] < config["tracking"]["depth_loss_thres"]
-                            and config["tracking"]["use_depth_loss_thres"]
-                        ):
-                            break
-                        # 如果没达到 depth_loss_thres 的话，迭代次数翻倍，继续循环
-                        elif (
-                            config["tracking"]["use_depth_loss_thres"]
-                            and not do_continue_slam
-                        ):
-                            do_continue_slam = True  # 最多只翻倍一次，防止陷入死循环
-                            progress_bar = tqdm(
-                                range(config["tracking"]["num_iters"]),
-                                desc=f"Tracking Time Step: {time_idx}",
-                            )
-                            num_iters_tracking = (
-                                num_iters_tracking + config["tracking"]["num_iters"]
-                            )
-                            if config["use_wandb"]:
-                                wandb_run.log(
-                                    {
-                                        "Tracking/Extra Tracking Iters Frames": time_idx,
-                                        "Tracking/step": wandb_time_step,
-                                    }
-                                )
-                        else:
-                            break
-
-                progress_bar.close()
-                # Copy over the best candidate rotation & translation 更新相机位姿参数
-                with torch.no_grad():
-                    params["cam_unnorm_rots"][..., time_idx] = candidate_cam_unnorm_rot
-                    params["cam_trans"][..., time_idx] = candidate_cam_tran
-            elif time_idx > 0 and config["tracking"]["use_gt_poses"]:
-                with torch.no_grad():
-                    # Get the ground truth pose relative to frame 0
-                    rel_w2c = curr_gt_w2c[-1]
-                    rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
-                    rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
-                    rel_w2c_tran = rel_w2c[:3, 3].detach()
-                    # Update the camera parameters
-                    params["cam_unnorm_rots"][..., time_idx] = rel_w2c_rot_quat
-                    params["cam_trans"][..., time_idx] = rel_w2c_tran
-            # Update the runtime numbers
-            tracking_end_time = time.time()
-            runtime_stats.add_tracking_frame(tracking_end_time - tracking_start_time)
-
-            # 每 report_global_progress_every 帧报告一次
-            if (
-                time_idx == 0
-                or (time_idx + 1) % config["report_global_progress_every"] == 0
-            ):
-                try:
-                    # Report Final Tracking Progress
-                    progress_bar = tqdm(
-                        range(1), desc=f"Tracking Result Time Step: {time_idx}"
-                    )
-                    with torch.no_grad():
-                        if config["use_wandb"]:
-                            report_progress(
-                                params,
-                                tracking_curr_data,
-                                1,
-                                progress_bar,
-                                iter_time_idx,
-                                sil_thres=config["tracking"]["sil_thres"],
-                                tracking=True,
-                                wandb_run=wandb_run,
-                                wandb_step=wandb_time_step,
-                                wandb_save_qual=config["wandb"]["save_qual"],
-                                global_logging=True,
-                            )
-                        else:
-                            report_progress(
-                                params,
-                                tracking_curr_data,
-                                1,
-                                progress_bar,
-                                iter_time_idx,
-                                sil_thres=config["tracking"]["sil_thres"],
-                                tracking=True,
-                            )
-                    progress_bar.close()
-                except BaseException:
-                    ckpt_output_dir = os.path.join(
-                        config["workdir"], config["run_name"]
-                    )
-                    save_params_ckpt(params, ckpt_output_dir, time_idx)
-                    print("Failed to evaluate trajectory.")
 
             # Densification & KeyFrame-based Mapping（slam肯定是每帧都建图）
             if time_idx == 0 or (time_idx + 1) % config["map_every"] == 0:
